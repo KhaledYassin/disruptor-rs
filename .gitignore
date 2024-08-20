@@ -1,0 +1,9 @@
+# Generated files
+/target/
+
+# IDE files
+.idea/
+.vscode/
+
+# Build artifacts
+Cargo.lock
