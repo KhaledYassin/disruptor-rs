@@ -52,6 +52,12 @@ impl Default for AtomicSequence {
     }
 }
 
+impl From<i64> for AtomicSequence {
+    fn from(value: i64) -> Self {
+        Self::new(value)
+    }
+}
+
 impl PartialEq for AtomicSequence {
     fn eq(&self, other: &Self) -> bool {
         self.get() == other.get()

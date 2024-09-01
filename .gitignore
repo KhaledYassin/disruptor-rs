@@ -1,8 +1,7 @@
 # Generated files
 /target/
 
-# IDE files
-.idea/
+# vscode files
 .vscode/
 
 # Build artifacts

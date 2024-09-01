@@ -173,24 +173,45 @@ mod tests {
 
     use super::*;
 
+    const BUFFER_SIZE: usize = 16;
+    const BUFFER_SIZE_I64: i64 = BUFFER_SIZE as i64;
+
     #[test]
     fn test_claim() {
-        let mut sequencer = SingleProducerSequencer::new(16, BusySpinWaitStrategy);
+        let mut sequencer = SingleProducerSequencer::new(BUFFER_SIZE, BusySpinWaitStrategy);
+        assert_eq!(sequencer.next_one(), Some(0));
+    }
+
+    #[test]
+    fn test_next_one() {
+        let mut sequencer = SingleProducerSequencer::new(BUFFER_SIZE, BusySpinWaitStrategy);
         sequencer.claim(0);
-        assert_eq!(sequencer.next_value, 0);
+        assert_eq!(sequencer.next_one(), Some(1));
     }
 
     #[test]
     fn test_is_available() {
-        let mut sequencer = SingleProducerSequencer::new(16, BusySpinWaitStrategy);
-        sequencer.claim(0);
-        assert!(sequencer.is_available(0));
-        assert!(!sequencer.is_available(1));
+        let mut sequencer = SingleProducerSequencer::new(BUFFER_SIZE, BusySpinWaitStrategy);
+        if let Some(next) = sequencer.next(6) {
+            for i in 0..6 {
+                assert!(!sequencer.is_available(i));
+            }
+
+            sequencer.publish(next - (6 - 1), next);
+
+            for i in 0..6 {
+                assert!(sequencer.is_available(i));
+            }
+
+            assert!(!sequencer.is_available(6));
+        } else {
+            panic!("Expected a value but got None.");
+        }
     }
 
     #[test]
     fn test_add_gating_sequences() {
-        let mut sequencer = SingleProducerSequencer::new(16, BusySpinWaitStrategy);
+        let mut sequencer = SingleProducerSequencer::new(BUFFER_SIZE, BusySpinWaitStrategy);
         let gating_sequence = Arc::new(AtomicSequence::default());
         sequencer.add_gating_sequences(gating_sequence.clone());
         assert_eq!(sequencer.gating_sequences.len(), 1);
@@ -199,7 +220,7 @@ mod tests {
 
     #[test]
     fn test_remove_gating_sequence() {
-        let mut sequencer = SingleProducerSequencer::new(16, BusySpinWaitStrategy);
+        let mut sequencer = SingleProducerSequencer::new(BUFFER_SIZE, BusySpinWaitStrategy);
         let gating_sequence = Arc::new(AtomicSequence::default());
         sequencer.add_gating_sequences(gating_sequence.clone());
         assert_eq!(sequencer.gating_sequences.len(), 1);
@@ -210,59 +231,71 @@ mod tests {
 
     #[test]
     fn test_create_sequence_barrier() {
-        let sequencer = SingleProducerSequencer::new(16, BusySpinWaitStrategy);
+        let sequencer = SingleProducerSequencer::new(BUFFER_SIZE, BusySpinWaitStrategy);
         let barrier = sequencer.create_sequence_barrier();
         assert_eq!(barrier.get_cursor(), sequencer.get_cursor());
     }
 
     #[test]
     fn test_get_cursor() {
-        let sequencer = SingleProducerSequencer::new(16, BusySpinWaitStrategy);
-        assert_eq!(sequencer.get_cursor(), 0);
+        let sequencer = SingleProducerSequencer::new(BUFFER_SIZE, BusySpinWaitStrategy);
+        assert_eq!(sequencer.get_cursor(), -1);
     }
 
     #[test]
     fn test_get_buffer_size() {
-        let sequencer = SingleProducerSequencer::new(16, BusySpinWaitStrategy);
-        assert_eq!(sequencer.get_buffer_size(), 16);
+        let sequencer = SingleProducerSequencer::new(BUFFER_SIZE, BusySpinWaitStrategy);
+        assert_eq!(sequencer.get_buffer_size(), BUFFER_SIZE_I64);
     }
 
     #[test]
     fn test_has_available_capacity() {
-        let mut sequencer = SingleProducerSequencer::new(16, BusySpinWaitStrategy);
-        sequencer.claim(0);
+        let mut sequencer = SingleProducerSequencer::new(BUFFER_SIZE, BusySpinWaitStrategy);
+
+        sequencer.add_gating_sequences(Arc::new(AtomicSequence::default()));
+
         assert!(sequencer.has_available_capacity(1));
-        assert!(!sequencer.has_available_capacity(16));
+        assert!(sequencer.has_available_capacity(BUFFER_SIZE_I64));
+        assert!(!sequencer.has_available_capacity(BUFFER_SIZE_I64 + 1));
+
+        let optional_next = sequencer.next_one();
+
+        if let Some(next) = optional_next {
+            sequencer.publish(next, next);
+            assert!(sequencer.has_available_capacity(BUFFER_SIZE_I64 - 1));
+            assert!(!sequencer.has_available_capacity(BUFFER_SIZE_I64));
+        } else {
+            panic!("Expected a value but got None.");
+        }
     }
 
     #[test]
     fn test_get_remaining_capacity() {
-        let mut sequencer = SingleProducerSequencer::new(16, BusySpinWaitStrategy);
-        sequencer.claim(0);
-        assert_eq!(sequencer.get_remaining_capacity(), 16);
-        sequencer.next(1);
-        assert_eq!(sequencer.get_remaining_capacity(), 15);
+        let mut sequencer = SingleProducerSequencer::new(BUFFER_SIZE, BusySpinWaitStrategy);
+        sequencer.add_gating_sequences(Arc::new(AtomicSequence::default()));
+        assert_eq!(sequencer.get_remaining_capacity(), BUFFER_SIZE_I64);
+
+        if let Some(next) = sequencer.next_one() {
+            sequencer.publish(next, next);
+            assert_eq!(sequencer.get_remaining_capacity(), BUFFER_SIZE_I64 - 1);
+        } else {
+            panic!("Expected a value but got None.");
+        }
     }
 
     #[test]
     fn test_next() {
-        let mut sequencer = SingleProducerSequencer::new(16, BusySpinWaitStrategy);
+        let mut sequencer = SingleProducerSequencer::new(BUFFER_SIZE, BusySpinWaitStrategy);
+        sequencer.add_gating_sequences(Arc::new(AtomicSequence::default()));
         sequencer.claim(0);
         assert_eq!(sequencer.next(1), Some(1));
-        assert_eq!(sequencer.next(16), None);
+        assert_eq!(sequencer.next(BUFFER_SIZE_I64), None);
     }
 
     #[test]
     fn test_publish() {
-        let sequencer = SingleProducerSequencer::new(16, BusySpinWaitStrategy);
+        let sequencer = SingleProducerSequencer::new(BUFFER_SIZE, BusySpinWaitStrategy);
         sequencer.publish(0, 10);
         assert_eq!(sequencer.cursor.get(), 10);
-    }
-
-    #[test]
-    fn test_next_one() {
-        let mut sequencer = SingleProducerSequencer::new(16, BusySpinWaitStrategy);
-        sequencer.claim(0);
-        assert_eq!(sequencer.next_one(), Some(1));
     }
 }
