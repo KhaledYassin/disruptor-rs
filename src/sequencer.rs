@@ -169,9 +169,12 @@ impl<W: WaitingStrategy> Sequencer for SingleProducerSequencer<W> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use crate::sequencer::{Sequencer, SingleProducerSequencer};
     use crate::waiting::BusySpinWaitStrategy;
+    use crate::sequence::AtomicSequence;
+    use crate::barrier::SequenceBarrier;
 
-    use super::*;
 
     const BUFFER_SIZE: usize = 16;
     const BUFFER_SIZE_I64: i64 = BUFFER_SIZE as i64;
