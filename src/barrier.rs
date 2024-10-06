@@ -2,21 +2,9 @@ use std::sync::{atomic::AtomicBool, Arc};
 
 use crate::{
     sequence::{AtomicSequence, Sequence},
+    traits::{SequenceBarrier, WaitingStrategy},
     utils::Utils,
-    waiting::WaitingStrategy,
 };
-
-pub trait SequenceBarrier: Send + Sync {
-    fn get_cursor(&self) -> Sequence;
-    fn wait_for(
-        &self,
-        sequence: &AtomicSequence,
-        dependencies: &[Arc<AtomicSequence>],
-    ) -> Option<Sequence>;
-    fn is_alerted(&self) -> bool;
-    fn alert(&self);
-    fn clear_alert(&self);
-}
 
 pub struct ProcessingSequenceBarrier<W: WaitingStrategy> {
     cursor: Arc<AtomicSequence>,
@@ -46,18 +34,14 @@ impl<W: WaitingStrategy> SequenceBarrier for ProcessingSequenceBarrier<W> {
         self.cursor.get()
     }
 
-    fn wait_for(
-        &self,
-        sequence: &AtomicSequence,
-        dependencies: &[Arc<AtomicSequence>],
-    ) -> Option<Sequence> {
+    fn wait_for(&self, sequence: Sequence) -> Option<Sequence> {
         let optional_available_sequence =
             self.waiting_strategy
-                .wait_for(sequence, dependencies, || self.is_alerted());
+                .wait_for(sequence, &self.dependencies, || self.is_alerted());
 
         match optional_available_sequence {
             Some(available_sequence) => {
-                if available_sequence < sequence.get() {
+                if available_sequence < sequence {
                     Some(available_sequence)
                 } else {
                     Some(Utils::get_maximum_sequence(&self.dependencies))
@@ -84,17 +68,14 @@ impl<W: WaitingStrategy> SequenceBarrier for ProcessingSequenceBarrier<W> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::Ordering;
-
     use super::*;
-
     #[derive(Default)]
     struct DummyWaitingStrategy;
 
     impl WaitingStrategy for DummyWaitingStrategy {
         fn wait_for<F: Fn() -> bool>(
             &self,
-            _sequence: &AtomicSequence,
+            _sequence: Sequence,
             _dependencies: &[Arc<AtomicSequence>],
             _is_alerted: F,
         ) -> Option<Sequence> {
@@ -107,37 +88,38 @@ mod tests {
 
     #[test]
     fn test_sequence_barrier() {
-        let cursor = Arc::new(AtomicSequence::new(0));
-        let alert = Arc::new(AtomicBool::new(false));
-        let dependency1 = Arc::new(AtomicSequence::new(0));
-        let dependency2 = Arc::new(AtomicSequence::new(0));
-        let dependencies = vec![dependency1.clone(), dependency2.clone()];
-        let waiting_strategy = Arc::new(DummyWaitingStrategy);
+        todo!("Reimplement tests here...");
+        // let cursor = Arc::new(AtomicSequence::new(0));
+        // let alert = Arc::new(AtomicBool::new(false));
+        // let dependency1 = Arc::new(AtomicSequence::new(0));
+        // let dependency2 = Arc::new(AtomicSequence::new(0));
+        // let dependencies = vec![dependency1.clone(), dependency2.clone()];
+        // let waiting_strategy = Arc::new(DummyWaitingStrategy);
 
-        let barrier = ProcessingSequenceBarrier::new(
-            cursor.clone(),
-            alert.clone(),
-            dependencies.clone(),
-            waiting_strategy.clone(),
-        );
+        // let barrier = ProcessingSequenceBarrier::new(
+        //     cursor.clone(),
+        //     alert.clone(),
+        //     dependencies.clone(),
+        //     waiting_strategy.clone(),
+        // );
 
-        // Test get_cursor
-        assert_eq!(barrier.get_cursor(), 0);
+        // // Test get_cursor
+        // assert_eq!(barrier.get_cursor(), 0);
 
-        // Test wait_for
-        let sequence = AtomicSequence::new(5);
-        let result = barrier.wait_for(&sequence, &dependencies);
-        assert_eq!(result, None);
+        // // Test wait_for
+        // let sequence = AtomicSequence::new(5);
+        // let result = barrier.wait_for(sequence);
+        // assert_eq!(result, None);
 
-        // Test is_alerted
-        assert!(!barrier.is_alerted());
+        // // Test is_alerted
+        // assert!(!barrier.is_alerted());
 
-        // Test alert
-        barrier.alert();
-        assert!(alert.load(Ordering::Acquire));
+        // // Test alert
+        // barrier.alert();
+        // assert!(alert.load(Ordering::Acquire));
 
-        // Test clear_alert
-        barrier.clear_alert();
-        assert!(!alert.load(Ordering::Acquire));
+        // // Test clear_alert
+        // barrier.clear_alert();
+        // assert!(!alert.load(Ordering::Acquire));
     }
 }

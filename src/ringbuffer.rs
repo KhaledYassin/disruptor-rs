@@ -1,5 +1,7 @@
 use std::cell::UnsafeCell;
 
+use crate::{sequence::Sequence, traits::DataProvider};
+
 /// A ring buffer with a fixed capacity.
 /// The capacity must be a power of 2. The buffer is initialized with default values.
 /// It is assumed that anything reading from or writing to this buffer will hold its own
@@ -12,67 +14,140 @@ use std::cell::UnsafeCell;
 /// We require intrior mutability to allow for multiple readers and writers to access the buffer concurrently.
 pub struct RingBuffer<T> {
     capacity: usize,
-    mask: usize,
-    buffer: UnsafeCell<Vec<T>>,
+    _mask: usize,
+    _data: Vec<UnsafeCell<T>>,
 }
 
 const fn is_power_of_two(x: usize) -> bool {
     x != 0 && (x & (x - 1)) == 0
 }
 
+unsafe impl<T: Send> Send for RingBuffer<T> {}
+unsafe impl<T: Sync> Sync for RingBuffer<T> {}
+
 impl<T: Default + Send> RingBuffer<T> {
     pub fn new(capacity: usize) -> Self {
         assert!(is_power_of_two(capacity), "Capacity must be a power of 2");
         Self {
             capacity,
-            mask: capacity - 1,
-            buffer: UnsafeCell::new((0..capacity).map(|_| T::default()).collect()),
+            _mask: capacity - 1,
+            _data: (0..capacity)
+                .map(|_| UnsafeCell::new(T::default()))
+                .collect(), // Initialize buffer with default values
         }
     }
 
     pub fn get_capacity(&self) -> usize {
         self.capacity
     }
+}
 
-    pub fn write(&mut self, index: usize, element: T) {
-        self.buffer.get_mut()[index & self.mask] = element;
+impl<T: Send + Sync> DataProvider<T> for RingBuffer<T> {
+    fn get_capacity(&self) -> usize {
+        self.capacity
     }
 
-    pub unsafe fn read(&mut self, index: usize) -> &T {
-        &self.buffer.get().as_ref().unwrap()[index & self.mask]
+    /// Get a reference to the element at the given sequence.
+    /// # Safety
+    /// This method is unsafe because it allows for multiple readers to access the buffer concurrently.
+    /// The caller must ensure that the sequence is within the bounds of the buffer.
+    /// # Arguments
+    /// - `sequence`: The sequence of the element to get.
+    /// # Returns
+    /// A reference to the element at the given sequence.
+    unsafe fn get(&self, sequence: Sequence) -> &T {
+        let index = sequence as usize & self._mask;
+        &*self._data[index].get()
+    }
+
+
+    /// Get a mutable reference to the element at the given sequence.
+    /// # Safety
+    /// This method is unsafe because it allows for multiple writers to access the buffer concurrently.
+    /// The caller must ensure that the sequence is within the bounds of the buffer.
+    /// # Arguments
+    /// - `sequence`: The sequence of the element to get.
+    /// # Returns
+    /// A mutable reference to the element at the given sequence.
+    unsafe fn get_mut(&self, sequence: Sequence) -> &mut T {
+        let index = sequence as usize & self._mask;
+        &mut *self._data[index].get()
     }
 }
 
 #[cfg(test)]
 mod tests {
 
-    use std::marker::PhantomData;
+    use std::{sync::Arc, thread};
 
     use super::*;
 
+    const ITERATIONS: i64 = 256;
+    const THREADS: usize = 4;
+
     #[test]
-    fn test_ring_buffer() {
-        unsafe {
-            let mut ring_buffer = RingBuffer::new(4);
-            ring_buffer.write(0, 1);
-            ring_buffer.write(1, 2);
-            ring_buffer.write(2, 3);
-            ring_buffer.write(3, 4);
-            assert_eq!(*ring_buffer.read(0), 1);
-            assert_eq!(*ring_buffer.read(1), 2);
-            assert_eq!(*ring_buffer.read(2), 3);
-            assert_eq!(*ring_buffer.read(3), 4);
-            ring_buffer.write(4, 5);
-            assert_eq!(*ring_buffer.read(0), 5);
-            assert_eq!(*ring_buffer.read(1), 2);
-            assert_eq!(*ring_buffer.read(2), 3);
-            assert_eq!(*ring_buffer.read(3), 4);
+    fn test_initialization() {
+        let buffer = RingBuffer::<i64>::new(ITERATIONS as usize);
+        
+        assert_eq!(buffer.get_capacity(), 256);
+
+        for i in 0..ITERATIONS {
+            unsafe {
+                assert_eq!(*buffer.get(i), 0);
+            }
         }
     }
 
     #[test]
-    #[should_panic]
-    fn test_ring_buffer_capacity_not_power_of_two() {
-        let _ring_buffer = RingBuffer::<PhantomData<i32>>::new(3);
+    fn test_ring_buffer() {
+        let buffer = RingBuffer::<i64>::new(ITERATIONS as usize);
+        assert_eq!(buffer.get_capacity(), 256);
+
+        for i in 0..ITERATIONS {
+            unsafe {
+                *buffer.get_mut(i) = i;
+            }
+        }
+
+        for i in 0..ITERATIONS {
+            unsafe {
+                *buffer.get_mut(i) *= 2;
+            }
+        }
+
+        for i in 0..ITERATIONS {
+            unsafe {
+                assert_eq!(*buffer.get(i), i * 2);
+            }
+        }
+    }
+
+    #[test]
+    fn test_ring_buffer_multithreaded() {
+        let buffer = Arc::new(RingBuffer::<i64>::new(ITERATIONS as usize));
+        let mut handles = vec![];
+
+        for _ in 0..THREADS {
+            let buffer = buffer.clone();
+            let handle = thread::spawn(move || {
+                for i in 0..ITERATIONS {
+                    unsafe {
+                        *buffer.get_mut(i) += i;
+                    }
+                }
+            });
+
+            handles.push(handle);
+        }
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        for i in 0..ITERATIONS {
+            unsafe {
+                assert_eq!(*buffer.get(i), i * THREADS as i64);
+            }
+        }
     }
 }

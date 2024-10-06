@@ -1,8 +1,13 @@
-mod utils;
+mod barrier;
+mod builder;
+mod executor;
+mod processor;
+mod producer;
+mod ringbuffer;
 mod sequence;
 mod sequencer;
-mod barrier;
-mod ringbuffer;
+mod traits;
+mod utils;
 mod waiting;
 
 #[cfg(test)]
