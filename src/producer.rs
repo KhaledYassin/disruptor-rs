@@ -21,18 +21,14 @@ impl<'a, D: DataProvider<T> + 'a, T, S: Sequencer + 'a> EventProducer<'a> for Pr
         F: Fn(&mut Self::Item, Sequence, &U),
     {
         let iter = items.into_iter();
-        if let Some((start, end)) = self.sequencer.next(iter.len() as i64) {
-            for (i, item) in iter.enumerate() {
-                let sequence = start + i as i64;
-                let data = unsafe {
-                    // SAFETY: The sequence is guaranteed to be within the bounds of the ring buffer.
-                    self.data_provider.get_mut(sequence)
-                };
-                f(data, sequence, &item);
-            }
-
-            self.sequencer.publish(start, end);
+        let (start, end) = self.sequencer.next(iter.len() as Sequence);
+        for (i, item) in iter.enumerate() {
+            let sequence = start + i as Sequence;
+            // SAFETY: The sequence is guaranteed to be within the bounds of the ring buffer.
+            let data = unsafe { self.data_provider.get_mut(sequence) };
+            f(data, sequence, &item);
         }
+        self.sequencer.publish(start, end);
     }
 
     fn drain(self) {

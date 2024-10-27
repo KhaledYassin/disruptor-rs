@@ -27,12 +27,12 @@ impl AtomicSequence {
 
     // Get the current value of the sequence.
     pub fn get(&self) -> Sequence {
-        self.value.load(Ordering::SeqCst)
+        self.value.load(Ordering::Acquire)
     }
 
     // Set a new value for the sequence.
     pub fn set(&self, new_value: Sequence) {
-        self.value.store(new_value, Ordering::SeqCst);
+        self.value.store(new_value, Ordering::Release);
     }
 
     // Increment the sequence by 1 and return the new value.

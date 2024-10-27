@@ -116,7 +116,7 @@ where
         self,
     ) -> WithSequencer<SingleProducerSequencer<W>, W, D, T> {
         let buffer_size = self.with_data_provider.data_provider.get_capacity();
-        self.with_sequencer(SingleProducerSequencer::new(buffer_size, W::default()))
+        self.with_sequencer(SingleProducerSequencer::new(buffer_size, W::new()))
     }
 }
 
@@ -171,6 +171,20 @@ impl<'a, S: Sequencer + 'a, D: DataProvider<T> + 'a, T: Send + 'a> BarrierScope<
         let runnable = processor.create(self.data_provider.clone(), barrier);
         self.event_handlers.push(runnable);
     }
+
+    pub fn with_barrier(mut self, f: impl FnOnce(&mut BarrierScope<'a, S, D, T>)) {
+        let mut scope = BarrierScope {
+            sequencer: self.sequencer,
+            data_provider: self.data_provider.clone(),
+            gating_sequences: self.cursors,
+            event_handlers: Vec::new(),
+            cursors: Vec::new(),
+            _element: Default::default(),
+        };
+
+        f(&mut scope);
+        self.event_handlers.append(&mut scope.event_handlers);
+    }
 }
 
 impl<'a, S: Sequencer + 'a, W: WaitingStrategy, D: DataProvider<T> + 'a, T: Send + Sync + 'a>
@@ -219,7 +233,7 @@ where
         for gs in &self.gating_sequences {
             self.with_sequencer
                 .sequencer
-                .add_gating_sequence(gs.clone());
+                .add_gating_sequence(gs);
         }
         let executor = E::with_runnables(self.event_handlers);
         let producer = Producer::new(

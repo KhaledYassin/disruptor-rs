@@ -64,11 +64,11 @@ where
                 Some(available_sequence) => {
                     for i in next_sequence..=available_sequence {
                         let event = unsafe { data_provider.get(i) };
-                        f.on_event(event, available_sequence, i == available_sequence);
+                        f.on_event(event, i, i == available_sequence);
                     }
 
                     cursor.set(available_sequence);
-                    barrier.alert();
+                    barrier.signal();
                 }
                 None => {
                     return;

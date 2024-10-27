@@ -13,11 +13,8 @@ use crate::sequence::{AtomicSequence, Sequence};
 // - `alert`: Alerts the barrier.
 // - `clear_alert`: Clears the alert.
 pub trait SequenceBarrier: Send + Sync {
-    fn get_cursor(&self) -> Sequence;
     fn wait_for(&self, sequence: Sequence) -> Option<Sequence>;
-    fn is_alerted(&self) -> bool;
-    fn alert(&self);
-    fn clear_alert(&self);
+    fn signal(&self);
 }
 
 // A trait for providing a sequencer.
@@ -40,21 +37,13 @@ pub trait SequenceBarrier: Send + Sync {
 pub trait Sequencer {
     type Barrier: SequenceBarrier;
     // Inteferface methods
-    fn claim(&mut self, sequence: Sequence);
-    fn is_available(&self, sequence: Sequence) -> bool;
-    fn add_gating_sequence(&mut self, gating_sequence: Arc<AtomicSequence>);
-    fn remove_gating_sequence(&mut self, sequence: Arc<AtomicSequence>) -> bool;
+    fn add_gating_sequence(&mut self, gating_sequence: &Arc<AtomicSequence>);
+    fn remove_gating_sequence(&mut self, sequence: &Arc<AtomicSequence>) -> bool;
     fn create_sequence_barrier(&self, gating_sequences: &[Arc<AtomicSequence>]) -> Self::Barrier;
 
     // Abstract methods
     fn get_cursor(&self) -> Arc<AtomicSequence>;
-    fn get_buffer_size(&self) -> i64;
-    fn has_available_capacity(&mut self, required_capacity: Sequence) -> bool;
-    fn get_remaining_capacity(&self) -> Sequence;
-    fn next_one(&mut self) -> Option<(Sequence, Sequence)> {
-        self.next(1)
-    }
-    fn next(&mut self, n: Sequence) -> Option<(Sequence, Sequence)>;
+    fn next(&mut self, n: Sequence) -> (Sequence, Sequence);
     fn publish(&self, low: Sequence, high: Sequence);
     fn drain(self);
 }
@@ -64,6 +53,7 @@ pub trait Sequencer {
 /// - `wait_for`: Waits for the given sequence to be available.
 /// - `signal_all_when_blocking`: Signals all when blocking.
 pub trait WaitingStrategy: Default + Send + Sync {
+    fn new() -> Self;
     fn wait_for<F: Fn() -> bool>(
         &self,
         sequence: Sequence,

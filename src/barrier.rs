@@ -1,125 +1,101 @@
-use std::sync::{atomic::AtomicBool, Arc};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 
 use crate::{
     sequence::{AtomicSequence, Sequence},
     traits::{SequenceBarrier, WaitingStrategy},
-    utils::Utils,
 };
 
 pub struct ProcessingSequenceBarrier<W: WaitingStrategy> {
-    cursor: Arc<AtomicSequence>,
     alert: Arc<AtomicBool>,
-    dependencies: Vec<Arc<AtomicSequence>>,
+    gating_sequences: Vec<Arc<AtomicSequence>>,
     waiting_strategy: Arc<W>,
 }
 
 impl<W: WaitingStrategy> ProcessingSequenceBarrier<W> {
     pub fn new(
-        cursor: Arc<AtomicSequence>,
         alert: Arc<AtomicBool>,
-        dependencies: Vec<Arc<AtomicSequence>>,
+        gating_sequences: Vec<Arc<AtomicSequence>>,
         waiting_strategy: Arc<W>,
     ) -> Self {
         Self {
-            cursor,
             alert,
-            dependencies,
+            gating_sequences,
             waiting_strategy,
         }
     }
 }
 
 impl<W: WaitingStrategy> SequenceBarrier for ProcessingSequenceBarrier<W> {
-    fn get_cursor(&self) -> Sequence {
-        self.cursor.get()
-    }
-
     fn wait_for(&self, sequence: Sequence) -> Option<Sequence> {
-        let optional_available_sequence =
-            self.waiting_strategy
-                .wait_for(sequence, &self.dependencies, || self.is_alerted());
-
-        match optional_available_sequence {
-            Some(available_sequence) => {
-                if available_sequence < sequence {
-                    Some(available_sequence)
-                } else {
-                    Some(Utils::get_maximum_sequence(&self.dependencies))
-                }
-            }
-            None => None,
-        }
+        self.waiting_strategy
+            .wait_for(sequence, &self.gating_sequences, || {
+                self.alert.load(Ordering::Relaxed)
+            })
     }
 
-    fn is_alerted(&self) -> bool {
-        self.alert.load(std::sync::atomic::Ordering::Acquire)
-    }
-
-    fn alert(&self) {
-        self.alert.store(true, std::sync::atomic::Ordering::Release);
-        self.waiting_strategy.signal_all_when_blocking();
-    }
-
-    fn clear_alert(&self) {
-        self.alert
-            .store(false, std::sync::atomic::Ordering::Release);
+    fn signal(&self) {
+        self.waiting_strategy.signal_all_when_blocking()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[derive(Default)]
-    struct DummyWaitingStrategy;
+    use crate::waiting::BusySpinWaitStrategy;
 
-    impl WaitingStrategy for DummyWaitingStrategy {
-        fn wait_for<F: Fn() -> bool>(
-            &self,
-            _sequence: Sequence,
-            _dependencies: &[Arc<AtomicSequence>],
-            _is_alerted: F,
-        ) -> Option<Sequence> {
-            let _ = _is_alerted;
-            None
-        }
+    #[test]
+    fn test_wait_for_returns_sequence_when_available() {
+        let alert = Arc::new(AtomicBool::new(false));
+        let seq = Arc::new(AtomicSequence::default());
+        seq.set(5);
+        let gating_sequences = vec![seq];
+        let waiting_strategy = Arc::new(BusySpinWaitStrategy::new());
 
-        fn signal_all_when_blocking(&self) {}
+        let barrier = ProcessingSequenceBarrier::new(alert, gating_sequences, waiting_strategy);
+
+        assert_eq!(barrier.wait_for(5), Some(5));
     }
 
     #[test]
-    fn test_sequence_barrier() {
-        todo!("Reimplement tests here...");
-        // let cursor = Arc::new(AtomicSequence::new(0));
-        // let alert = Arc::new(AtomicBool::new(false));
-        // let dependency1 = Arc::new(AtomicSequence::new(0));
-        // let dependency2 = Arc::new(AtomicSequence::new(0));
-        // let dependencies = vec![dependency1.clone(), dependency2.clone()];
-        // let waiting_strategy = Arc::new(DummyWaitingStrategy);
+    fn test_wait_for_returns_none_when_alerted() {
+        let alert = Arc::new(AtomicBool::new(true));
+        let seq = Arc::new(AtomicSequence::default());
+        let gating_sequences = vec![seq];
+        let waiting_strategy = Arc::new(BusySpinWaitStrategy::new());
 
-        // let barrier = ProcessingSequenceBarrier::new(
-        //     cursor.clone(),
-        //     alert.clone(),
-        //     dependencies.clone(),
-        //     waiting_strategy.clone(),
-        // );
+        let barrier = ProcessingSequenceBarrier::new(alert, gating_sequences, waiting_strategy);
 
-        // // Test get_cursor
-        // assert_eq!(barrier.get_cursor(), 0);
+        assert_eq!(barrier.wait_for(5), None);
+    }
 
-        // // Test wait_for
-        // let sequence = AtomicSequence::new(5);
-        // let result = barrier.wait_for(sequence);
-        // assert_eq!(result, None);
+    #[test]
+    fn test_signal_calls_waiting_strategy() {
+        let alert = Arc::new(AtomicBool::new(false));
+        let seq = Arc::new(AtomicSequence::default());
+        let gating_sequences = vec![seq];
+        let waiting_strategy = Arc::new(BusySpinWaitStrategy::new());
 
-        // // Test is_alerted
-        // assert!(!barrier.is_alerted());
+        let barrier = ProcessingSequenceBarrier::new(alert, gating_sequences, waiting_strategy);
 
-        // // Test alert
-        // barrier.alert();
-        // assert!(alert.load(Ordering::Acquire));
+        barrier.signal(); // Just verify it doesn't panic
+    }
 
-        // // Test clear_alert
-        // barrier.clear_alert();
-        // assert!(!alert.load(Ordering::Acquire));
+    #[test]
+    fn test_multiple_gating_sequences() {
+        let alert = Arc::new(AtomicBool::new(false));
+        let seq1 = Arc::new(AtomicSequence::default());
+        let seq2 = Arc::new(AtomicSequence::default());
+        seq1.set(5);
+        seq2.set(3);
+        let gating_sequences = vec![seq1, seq2];
+        let waiting_strategy = Arc::new(BusySpinWaitStrategy::new());
+
+        let barrier = ProcessingSequenceBarrier::new(alert, gating_sequences, waiting_strategy);
+
+        // Should wait for minimum sequence (3)
+        assert_eq!(barrier.wait_for(3), Some(3));
     }
 }
