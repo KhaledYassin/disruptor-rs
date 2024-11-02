@@ -1,3 +1,96 @@
+//! Waiting strategies for coordinating producers and consumers in the Disruptor pattern.
+//!
+//! # Purpose of Waiting Strategies
+//!
+//! Waiting strategies manage how threads behave when they cannot make immediate progress:
+//! - Producers wait when the ring buffer is full (backpressure)
+//! - Consumers wait when no new items are available
+//!
+//! The choice of waiting strategy represents a trade-off between:
+//! - Latency (how quickly threads respond to new data)
+//! - CPU usage (how efficiently threads wait)
+//! - Thread context switching
+//!
+//! # Available Strategies
+//!
+//! ## BusySpinWaitStrategy
+//! ```rust
+//! /// Highest performance waiting strategy that continuously polls for updates.
+//! ///
+//! /// # Characteristics
+//! /// - Lowest latency (sub-microsecond response times)
+//! /// - Highest CPU usage (100% core utilization)
+//! /// - No context switching
+//! ///
+//! /// # Best Used When
+//! /// - Latency is critical
+//! /// - Dedicated CPU cores are available
+//! /// - Running on systems with consistent processing time requirements
+//! #[derive(Default)]
+//! pub struct BusySpinWaitStrategy;
+//! ```
+//!
+//! ## YieldingWaitStrategy
+//! ```rust
+//! /// Balanced waiting strategy that spins for a while before yielding.
+//! ///
+//! /// # Characteristics
+//! /// - Medium-low latency (few microseconds)
+//! /// - Moderate CPU usage
+//! /// - Occasional context switching
+//! ///
+//! /// # Implementation Details
+//! /// 1. Spins for 100 iterations checking for updates
+//! /// 2. Calls `thread::yield_now()` to allow other threads to run
+//! ///
+//! /// # Best Used When
+//! /// - Balance between latency and CPU usage is needed
+//! /// - System is under mixed workload
+//! #[derive(Default)]
+//! pub struct YieldingWaitStrategy;
+//! ```
+//!
+//! ## SleepingWaitStrategy
+//! ```rust
+//! /// Conservative waiting strategy that sleeps between checks.
+//! ///
+//! /// # Characteristics
+//! /// - Higher latency (millisecond range)
+//! /// - Lowest CPU usage
+//! /// - Regular context switching
+//! ///
+//! /// # Implementation Details
+//! /// 1. Spins for 200 iterations checking for updates
+//! /// 2. Sleeps for 1 microsecond between checks
+//! ///
+//! /// # Best Used When
+//! /// - CPU efficiency is more important than latency
+//! /// - Processing times are variable or unpredictable
+//! /// - Running on systems with power/thermal constraints
+//! #[derive(Default)]
+//! pub struct SleepingWaitStrategy;
+//! ```
+//!
+//! # Choosing a Strategy
+//!
+//! Selection criteria should consider:
+//! 1. Latency requirements
+//! 2. Available CPU resources
+//! 3. System power constraints
+//! 4. Other workloads on the system
+//!
+//! ## Performance Impact
+//! The waiting strategy can significantly impact the Disruptor's performance:
+//! - BusySpinWaitStrategy: Nanosecond response times but high CPU usage
+//! - YieldingWaitStrategy: Microsecond response times with moderate CPU usage
+//! - SleepingWaitStrategy: Millisecond response times but minimal CPU impact
+//!
+//! ## System Considerations
+//! - Number of available cores
+//! - Power consumption requirements
+//! - Operating system scheduling policies
+//! - Other applications running on the system
+
 use std::sync::Arc;
 
 use crate::{
@@ -114,7 +207,6 @@ impl WaitingStrategy for SleepingWaitStrategy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::Ordering;
     use std::thread;
     use std::time::Duration;
 

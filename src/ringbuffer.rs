@@ -60,7 +60,6 @@ impl<T: Send + Sync> DataProvider<T> for RingBuffer<T> {
         &*self._data[index].get()
     }
 
-
     /// Get a mutable reference to the element at the given sequence.
     /// # Safety
     /// This method is unsafe because it allows for multiple writers to access the buffer concurrently.
@@ -88,7 +87,7 @@ mod tests {
     #[test]
     fn test_initialization() {
         let buffer = RingBuffer::<i64>::new(ITERATIONS as usize);
-        
+
         assert_eq!(buffer.get_capacity(), 256);
 
         for i in 0..ITERATIONS {

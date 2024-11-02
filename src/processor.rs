@@ -1,3 +1,129 @@
+//! Event processors that consume and handle events from the ring buffer.
+//!
+//! # Understanding Processors
+//!
+//! Processors are the consumers in the Disruptor pattern. They:
+//! 1. Read events from specific sequences in the ring buffer
+//! 2. Process events through user-defined handlers
+//! 3. Track their progress using sequence counters
+//!
+//! # Usage Examples
+//!
+//! ## Basic Single Consumer
+//! ```rust
+//! use my_disruptor::{
+//!     EventProcessorFactory,
+//!     RingBuffer,
+//!     EventHandler,
+//!     WaitStrategy,
+//!     Sequence,
+//! };
+//!
+//! // 1. Define your event handler
+//! struct MyHandler;
+//! impl EventHandler<MyEvent> for MyHandler {
+//!     fn on_event(&self, event: &MyEvent, sequence: Sequence, end_of_batch: bool) {
+//!         // Process the event
+//!         println!("Processing event at sequence {}: {:?}", sequence, event);
+//!     }
+//!
+//!     // Optional lifecycle methods
+//!     fn on_start(&self) {
+//!         println!("Handler started");
+//!     }
+//!
+//!     fn on_shutdown(&self) {
+//!         println!("Handler shutting down");
+//!     }
+//! }
+//!
+//! // 2. Create and configure the processor
+//! let handler = MyHandler;
+//! let processor = EventProcessorFactory::create(handler);
+//!
+//! // 3. Connect to ring buffer
+//! let runnable = processor.create(
+//!     ring_buffer.clone(),
+//!     barrier
+//! );
+//!
+//! // 4. Run the processor (typically in its own thread)
+//! std::thread::spawn(move || {
+//!     runnable.run();
+//! });
+//! ```
+//!
+//! ## Multiple Dependent Consumers
+//! ```rust
+//! // Create processors with dependencies
+//! let processor_a = EventProcessorFactory::create(HandlerA);
+//! let processor_b = EventProcessorFactory::create(HandlerB);
+//!
+//! // Get processor A's sequence for processor B's barrier
+//! let seq_a = processor_a.get_sequence();
+//!
+//! // Create barriers with dependencies
+//! let barrier_a = ring_buffer.new_barrier();
+//! let barrier_b = ring_buffer.new_barrier_with_sequences(vec![seq_a]);
+//!
+//! // Create runnables
+//! let runnable_a = processor_a.create(ring_buffer.clone(), barrier_a);
+//! let runnable_b = processor_b.create(ring_buffer.clone(), barrier_b);
+//!
+//! // Run processors
+//! std::thread::spawn(move || runnable_a.run());
+//! std::thread::spawn(move || runnable_b.run());
+//! ```
+//!
+//! # Best Practices
+//!
+//! 1. **Handler Design**:
+//!    - Keep handlers stateless if possible
+//!    - Minimize processing time in `on_event`
+//!    - Use `end_of_batch` for batch optimizations
+//!
+//! 2. **Dependencies**:
+//!    - Create clear processing chains
+//!    - Avoid circular dependencies
+//!    - Consider using multiple ring buffers for complex flows
+//!
+//! 3. **Performance**:
+//!    - Choose appropriate wait strategies
+//!    - Monitor sequence progress
+//!    - Consider batch sizes in handler logic
+//!
+//! # Error Handling
+//!
+//! Handlers should manage their own error handling:
+//! ```rust
+//! impl EventHandler<MyEvent> for MyHandler {
+//!     fn on_event(&self, event: &MyEvent, sequence: Sequence, end_of_batch: bool) {
+//!         match process_event(event) {
+//!             Ok(_) => {
+//!                 // Normal processing
+//!             }
+//!             Err(e) => {
+//!                 // Log error but continue processing
+//!                 log::error!("Error processing event at {}: {:?}", sequence, e);
+//!             }
+//!         }
+//!     }
+//! }
+//! ```
+//!
+//! # Shutdown Handling
+//!
+//! Proper shutdown sequence:
+//! ```rust
+//! // Signal shutdown
+//! runnable.stop();
+//!
+//! // Wait for processing to complete
+//! while runnable.is_running() {
+//!     std::thread::sleep(std::time::Duration::from_millis(100));
+//! }
+//! ```
+
 use std::sync::{
     atomic::{AtomicU8, Ordering},
     Arc,

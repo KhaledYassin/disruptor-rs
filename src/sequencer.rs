@@ -1,3 +1,45 @@
+//! The Sequencer is the heart of the Disruptor pattern, coordinating access to the ring buffer.
+//!
+//! # Overview
+//! The Sequencer manages the production and tracking of sequence numbers, which represent
+//! positions in the ring buffer. It serves several critical functions:
+//!
+//! 1. **Sequence Generation**: Provides unique, monotonically increasing sequence numbers
+//!    to producers, ensuring ordered data flow.
+//!
+//! 2. **Capacity Management**: Prevents buffer overflow by tracking consumer progress
+//!    through gating sequences and ensuring producers don't overwrite unprocessed data.
+//!
+//! 3. **Publisher Coordination**: Manages the publication of new entries and notifies
+//!    consumers when new data is available.
+//!
+//! # Single Producer Design
+//! This implementation (`SingleProducerSequencer`) is optimized for single-producer scenarios,
+//! avoiding the need for CAS operations when claiming sequences. Key features:
+//!
+//! - Uses an atomic cursor to track the last published sequence
+//! - Maintains gating sequences to track consumer progress
+//! - Supports configurable waiting strategies for different throughput/CPU trade-offs
+//!
+//! # Usage Example
+//! ```rust
+//! use crate::sequencer::SingleProducerSequencer;
+//! use crate::waiting::BusySpinWaitStrategy;
+//!
+//! // Create a sequencer with a buffer of 1024 slots
+//! let sequencer = SingleProducerSequencer::new(1024, BusySpinWaitStrategy);
+//! ```
+//!
+//! # Producer Workflow
+//! 1. Producer requests next sequence(s) via `next()`
+//! 2. Writes data to the ring buffer at the claimed sequence(s)
+//! 3. Publishes sequences via `publish()` to make data visible to consumers
+//!
+//! # Consumer Coordination
+//! - Consumers track their progress using gating sequences
+//! - Sequencer ensures producers don't overwrite data still being processed
+//! - Waiting strategy determines how threads wait for available sequences
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 

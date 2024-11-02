@@ -1,6 +1,15 @@
 [package]
-name = "distruptor"
+name = "disruptor-rs"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+criterion = "0.5"
+crossbeam-channel = "0.5.13"
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "throughput"
+harness = false

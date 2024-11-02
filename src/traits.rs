@@ -1,39 +1,79 @@
+//! Core traits defining the Disruptor pattern interface.
+//!
+//! This module contains the fundamental traits that make up the Disruptor pattern:
+//! - Event processing and handling
+//! - Sequence management
+//! - Data access and storage
+//! - Execution control
+//!
+//! # Core Traits Overview
+//!
+//! ## Event Processing
+//! - [`EventProcessor`]: Processes events from the ring buffer
+//! - [`EventHandler`]: Handles individual events
+//! - [`EventProducer`]: Produces events into the ring buffer
+//!
+//! ## Sequence Management
+//! - [`Sequencer`]: Manages sequences for event coordination
+//! - [`SequenceBarrier`]: Controls access to sequences
+//! - [`WaitingStrategy`]: Defines how threads wait for available sequences
+//!
+//! ## Data Access
+//! - [`DataProvider`]: Provides safe and unsafe access to the underlying buffer
+//!
+//! ## Execution
+//! - [`Runnable`]: Base interface for executable components
+//! - [`EventProcessorExecutor`]: Manages execution of event processors
+//! - [`ExecutorHandle`]: Controls executor lifecycle
+//!
+//! # Examples
+//!
+//! ```rust
+//! use distruptor::{EventHandler, Sequence};
+//!
+//! struct MyHandler;
+//! impl EventHandler<i64> for MyHandler {
+//!     fn on_event(&self, event: &i64, sequence: Sequence, end_of_batch: bool) {
+//!         // Process the event
+//!     }
+//!     fn on_start(&self) {}
+//!     fn on_shutdown(&self) {}
+//! }
+//! ```
+
 use std::sync::Arc;
 
 use crate::sequence::{AtomicSequence, Sequence};
 
-// A trait for providing a sequence barrier.
-// # Types
-// - `Sequence`: The type of sequence used.
-// - `AtomicSequence`: The type of atomic sequence used.
-// # Methods
-// - `get_cursor`: Returns the current cursor value.
-// - `wait_for`: Waits for the given sequence to be available.
-// - `is_alerted`: Returns true if the barrier has been alerted.
-// - `alert`: Alerts the barrier.
-// - `clear_alert`: Clears the alert.
+/// Controls access to sequences in the ring buffer.
+///
+/// A sequence barrier determines when sequences are available for processing
+/// and manages coordination between different components.
+///
+/// # Methods
+/// * `wait_for` - Blocks until a sequence becomes available
+/// * `signal` - Signals that new sequences may be available
 pub trait SequenceBarrier: Send + Sync {
     fn wait_for(&self, sequence: Sequence) -> Option<Sequence>;
     fn signal(&self);
 }
 
-// A trait for providing a sequencer.
-// # Types
-// - `Barrier`: The type of sequence barrier used.
-// # Methods
-// - `claim`: Claims the given sequence.
-// - `is_available`: Returns true if the given sequence is available.
-// - `add_gating_sequences`: Adds the given gating sequences.
-// - `remove_gating_sequence`: Removes the given gating sequence.
-// - `create_sequence_barrier`: Creates a new sequence barrier.
-// - `get_cursor`: Returns the current cursor value.
-// - `get_buffer_size`: Returns the buffer size.
-// - `has_available_capacity`: Returns true if the buffer has available capacity.
-// - `get_remaining_capacity`: Returns the remaining capacity.
-// - `next_one`: Returns the next sequence.
-// - `next`: Returns the next `n` sequences.
-// - `publish`: Publishes the given sequences.
-// - `drain`: Drains the sequencer.
+/// Manages sequence generation and coordination in the ring buffer.
+///
+/// The sequencer is responsible for generating new sequence numbers and
+/// managing the relationship between publishers and subscribers.
+///
+/// # Type Parameters
+/// * `Barrier` - The type of sequence barrier used by this sequencer
+///
+/// # Methods
+/// * `add_gating_sequence` - Adds a gating sequence to the sequencer
+/// * `remove_gating_sequence` - Removes a gating sequence from the sequencer
+/// * `create_sequence_barrier` - Creates a sequence barrier with the given gating sequences
+/// * `get_cursor` - Returns the current cursor value
+/// * `next` - Gets the next sequence value
+/// * `publish` - Publishes the given sequence range
+/// * `drain` - Drains the sequencer
 pub trait Sequencer {
     type Barrier: SequenceBarrier;
     // Inteferface methods
@@ -48,10 +88,27 @@ pub trait Sequencer {
     fn drain(self);
 }
 
-/// A trait for providing a waiting strategy.
+/// Defines how threads wait for available sequences.
+///
+/// Implements the strategy pattern for different waiting behaviors when
+/// sequences are not yet available.
+///
+/// # Examples
+///
+/// ```
+/// use distruptor::WaitingStrategy;
+///
+/// struct BlockingWaitStrategy;
+///
+/// impl WaitingStrategy for BlockingWaitStrategy {
+///     // Implementation details...
+/// }
+/// ```
+///
 /// # Methods
-/// - `wait_for`: Waits for the given sequence to be available.
-/// - `signal_all_when_blocking`: Signals all when blocking.
+/// * `new` - Creates a new instance of the waiting strategy
+/// * `wait_for` - Waits for the given sequence to be available
+/// * `signal_all_when_blocking` - Signals that all threads should be blocked
 pub trait WaitingStrategy: Default + Send + Sync {
     fn new() -> Self;
     fn wait_for<F: Fn() -> bool>(
@@ -64,30 +121,41 @@ pub trait WaitingStrategy: Default + Send + Sync {
     fn signal_all_when_blocking(&self);
 }
 
-/// A trait for providing data from a buffer.
-/// # Types
-/// - `T`: The type of elements in the buffer.
-/// # Safety
-/// This trait is unsafe because it allows for mutable access to the buffer. It is up to the implementor
-/// to ensure that the buffer is accessed correctly.
+/// Provides safe and unsafe access to the underlying ring buffer.
 ///
-/// # Methods
-/// - `get_capacity`: Returns the capacity of the buffer.
-/// - `get`: Returns a reference to the element at the given sequence.
-/// - `get_mut`: Returns a mutable reference to the element at the given sequence.
+/// # Safety
+///
+/// This trait provides both safe and unsafe methods for accessing the buffer.
+/// Implementors must ensure proper bounds checking and memory safety.
+///
+/// # Type Parameters
+/// * `T` - The type of elements stored in the buffer.
+///
+/// This lint allow is necessary because DataProvider::get_mut returns a mutable reference from an immutable one.
+/// This is safe in our case because we use interior mutability (UnsafeCell) in the RingBuffer implementation,
+/// and the safety is guaranteed by the Sequencer which ensures proper synchronization of access to the buffer.
 #[allow(clippy::mut_from_ref)]
 pub trait DataProvider<T>: Send + Sync {
     fn get_capacity(&self) -> usize;
+
+    /// # Safety
+    /// Caller must ensure the sequence is valid and in bounds
     unsafe fn get(&self, sequence: Sequence) -> &T;
+
+    /// # Safety
+    /// Caller must ensure the sequence is valid and in bounds and no other references exist
     unsafe fn get_mut(&self, sequence: Sequence) -> &mut T;
 }
 
-/// A trait for providing a runnable object.
+/// Defines the lifecycle operations for executable components.
+///
+/// Provides basic control operations for starting, stopping, and
+/// checking the status of running components.
+///
 /// # Methods
-/// - `start`: Starts the runnable object.
-/// - `stop`: Stops the runnable object.
-/// - `run`: Runs the runnable object.
-/// - `is_running`: Returns true if the runnable object is running.
+/// * `run` - Starts the component
+/// * `stop` - Stops the component
+/// * `is_running` - Checks if the component is running
 pub trait Runnable: Send {
     fn run(&self);
     fn stop(&mut self);
@@ -98,8 +166,8 @@ pub trait Runnable: Send {
 /// # Types
 /// - `T`: The type of events to process.
 /// # Methods
-/// - `create`: Creates a new event processor.
-/// - `get_sequence`: Returns the sequence of the event processor.
+/// * `create`: Creates a new event processor.
+/// * `get_sequence`: Returns the sequence of the event processor.
 pub trait EventProcessor<'a, T> {
     fn get_cursor(&self) -> Arc<AtomicSequence>;
     fn create<D: DataProvider<T> + 'a, S: SequenceBarrier + 'a>(
@@ -114,9 +182,9 @@ pub trait EventProcessor<'a, T> {
 /// # Types
 /// - `T`: The type of events to handle.
 /// # Methods
-/// - `on_event`: Handles the given event.
-/// - `on_start`: Called when the event handler starts.
-/// - `on_shutdown`: Called when the event handler shuts down.
+/// * `on_event`: Handles the given event.
+/// * `on_start`: Called when the event handler starts.
+/// * `on_shutdown`: Called when the event handler shuts down.
 pub trait EventHandler<T> {
     fn on_event(&self, event: &T, sequence: Sequence, end_of_batch: bool);
     fn on_start(&self);
@@ -125,7 +193,7 @@ pub trait EventHandler<T> {
 
 /// A trait for providing an executor thread handle.
 /// # Methods
-/// - `join`: Joins the executor thread.
+/// * `join`: Joins the executor thread.
 pub trait ExecutorHandle {
     fn join(self);
 }
@@ -134,8 +202,8 @@ pub trait ExecutorHandle {
 /// # Types
 /// - `Handle`: The type of executor handle.
 /// # Methods
-/// - `with_runnales`: Creates a new executor with the given runnables.
-/// - `spwan`: Spawns the executor.
+/// * `with_runnales`: Creates a new executor with the given runnables.
+/// * `spwan`: Spawns the executor.
 pub trait EventProcessorExecutor<'a> {
     type Handle: ExecutorHandle;
     fn with_runnables(runnables: Vec<Box<dyn Runnable + 'a>>) -> Self;
@@ -146,8 +214,8 @@ pub trait EventProcessorExecutor<'a> {
 /// # Types
 /// - `Item`: The type of events to produce.
 /// # Methods
-/// - `write`: Writes the given event.
-/// - `drain`: Drains the event producer.
+/// * `write`: Writes the given event.
+/// * `drain`: Drains the event producer.
 pub trait EventProducer<'a> {
     type Item;
 

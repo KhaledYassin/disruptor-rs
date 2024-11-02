@@ -4,7 +4,7 @@ mod executor;
 mod processor;
 mod producer;
 mod ringbuffer;
-mod sequence;
+pub mod sequence;
 mod sequencer;
 mod traits;
 mod utils;
@@ -18,16 +18,15 @@ pub mod internal {
     pub use super::processor::*;
     pub use super::producer::*;
     pub use super::ringbuffer::*;
+    pub use super::sequence::*;
     pub use super::waiting::*;
 }
 
 #[cfg(test)]
 mod tests {
-
-    use std::sync::Arc;
-
     use ringbuffer::RingBuffer;
     use sequence::Sequence;
+    use std::sync::Arc;
     use traits::{EventHandler, EventProcessorExecutor, EventProducer, ExecutorHandle};
 
     use super::*;

@@ -14,6 +14,89 @@ use crate::{
     waiting::{BusySpinWaitStrategy, YieldingWaitStrategy},
 };
 
+/// # Disruptor Builder Pattern Guide
+///
+/// The builder follows a type-state pattern to ensure compile-time correctness.
+/// Each step in the builder chain enforces required configuration in a specific order:
+///
+/// 1. Start with data provider (ring buffer)
+/// 2. Configure waiting strategy
+/// 3. Set up sequencer
+/// 4. Add event handlers
+/// 5. Build the final disruptor
+///
+/// ## Example Usage
+/// ```rust
+/// use disruptor_rs::{
+///     DisruptorBuilder, EventHandler, EventProcessorExecutor, EventProducer,
+///     internal::Sequence,
+/// };
+///
+/// #[derive(Default)]
+/// struct MyEvent;
+///
+/// #[derive(Default)]
+/// struct MyEventHandler;
+///
+/// impl EventHandler<MyEvent> for MyEventHandler {
+///     fn on_event(&self, _event: &MyEvent, _sequence: Sequence, _end_of_batch: bool) {}
+///     fn on_start(&self) {}
+///     fn on_shutdown(&self) {}
+/// }
+///
+/// let (executor, producer) = DisruptorBuilder::with_ring_buffer::<MyEvent>(1024)
+///     .with_busy_spin_waiting_strategy()
+///     .with_single_producer_sequencer()
+///     .with_barrier(|scope| {
+///         scope.handle_events(MyEventHandler::default());
+///     })
+///     .build();
+/// ```
+///
+/// ## Builder States
+/// - `WithDataProvider`: Initial state, holds the ring buffer
+/// - `WithWaitingStrategy`: Configures how consumers wait for new events
+/// - `WithSequencer`: Manages the sequencing of events
+/// - `WithEventHandlers`: Configures event processing chain
+///
+/// ## Barrier Scopes
+/// The `with_barrier` method creates scopes for configuring event handlers
+/// in a dependency chain. Handlers within the same barrier scope can run
+/// in parallel, while different barrier scopes run sequentially.
+///
+/// ```rust
+/// use disruptor_rs::{
+///     DisruptorBuilder, EventHandler, EventProcessorExecutor, EventProducer,
+///     internal::Sequence,
+/// };
+///
+/// #[derive(Default)]
+/// struct MyEvent;
+///
+/// #[derive(Default)]
+/// struct MyEventHandler;
+///
+/// impl EventHandler<MyEvent> for MyEventHandler {
+///     fn on_event(&self, _event: &MyEvent, _sequence: Sequence, _end_of_batch: bool) {}
+///     fn on_start(&self) {}
+///     fn on_shutdown(&self) {}
+/// }
+///
+/// let (executor, producer) = DisruptorBuilder::with_ring_buffer::<MyEvent>(1024)
+///     .with_busy_spin_waiting_strategy()
+///     .with_single_producer_sequencer()
+///     .with_barrier(|scope| {
+///         // These handlers run in parallel
+///         scope.handle_events(MyEventHandler::default());
+///         scope.handle_events(MyEventHandler::default());
+///     })
+///     .with_barrier(|scope| {
+///         // This handler waits for both previous handlers
+///         scope.handle_events(MyEventHandler::default());
+///     })
+///     .build();
+/// ```
+
 #[derive(Debug)]
 pub struct DisruptorBuilder {}
 
@@ -231,9 +314,7 @@ where
         mut self,
     ) -> (E, impl EventProducer<'a, Item = T>) {
         for gs in &self.gating_sequences {
-            self.with_sequencer
-                .sequencer
-                .add_gating_sequence(gs);
+            self.with_sequencer.sequencer.add_gating_sequence(gs);
         }
         let executor = E::with_runnables(self.event_handlers);
         let producer = Producer::new(
