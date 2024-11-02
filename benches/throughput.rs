@@ -1,6 +1,6 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use disruptor_rs::{
-    internal::Sequence, DisruptorBuilder, EventHandler, EventProcessorExecutor, EventProducer,
+    sequence::Sequence, DisruptorBuilder, EventHandler, EventProcessorExecutor, EventProducer,
     ExecutorHandle,
 };
 use std::sync::mpsc;

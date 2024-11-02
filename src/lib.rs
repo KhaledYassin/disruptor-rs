@@ -1,26 +1,18 @@
 mod barrier;
 mod builder;
 mod executor;
-mod processor;
-mod producer;
-mod ringbuffer;
+pub mod processor;
+pub mod producer;
+pub mod ringbuffer;
 pub mod sequence;
-mod sequencer;
-mod traits;
-mod utils;
-mod waiting;
+pub mod sequencer;
+pub mod traits;
+pub mod utils;
+pub mod waiting;
 
+pub use barrier::*;
 pub use builder::*;
 pub use traits::*;
-pub mod internal {
-    pub use super::barrier::*;
-    pub use super::executor::*;
-    pub use super::processor::*;
-    pub use super::producer::*;
-    pub use super::ringbuffer::*;
-    pub use super::sequence::*;
-    pub use super::waiting::*;
-}
 
 #[cfg(test)]
 mod tests {

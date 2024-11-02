@@ -11,20 +11,20 @@
 //!
 //! ## Basic Single Consumer
 //! ```rust
-//! use my_disruptor::{
-//!     EventProcessorFactory,
-//!     RingBuffer,
-//!     EventHandler,
-//!     WaitStrategy,
-//!     Sequence,
-//! };
+//! # use disruptor_rs::{
+//! #     processor::EventProcessorFactory,
+//! #     traits::{EventHandler, Runnable},
+//! #     sequence::Sequence,
+//! # };
 //!
 //! // 1. Define your event handler
+//! struct MyEvent;
 //! struct MyHandler;
+//!
 //! impl EventHandler<MyEvent> for MyHandler {
-//!     fn on_event(&self, event: &MyEvent, sequence: Sequence, end_of_batch: bool) {
+//!     fn on_event(&self, _event: &MyEvent, sequence: Sequence, _end_of_batch: bool) {
 //!         // Process the event
-//!         println!("Processing event at sequence {}: {:?}", sequence, event);
+//!         println!("Processing event at sequence {}", sequence);
 //!     }
 //!
 //!     // Optional lifecycle methods
@@ -32,47 +32,88 @@
 //!         println!("Handler started");
 //!     }
 //!
-//!     fn on_shutdown(&self) {
-//!         println!("Handler shutting down");
-//!     }
+//!     fn on_shutdown(&self) {}
 //! }
 //!
-//! // 2. Create and configure the processor
+//! // 2. Create the processor
 //! let handler = MyHandler;
 //! let processor = EventProcessorFactory::create(handler);
-//!
-//! // 3. Connect to ring buffer
-//! let runnable = processor.create(
-//!     ring_buffer.clone(),
-//!     barrier
-//! );
-//!
-//! // 4. Run the processor (typically in its own thread)
-//! std::thread::spawn(move || {
-//!     runnable.run();
-//! });
 //! ```
 //!
 //! ## Multiple Dependent Consumers
-//! ```rust
-//! // Create processors with dependencies
+//! ```
+//! use disruptor_rs::{
+//!     processor::EventProcessorFactory,
+//!     traits::{EventHandler, Runnable, DataProvider, EventProcessor, SequenceBarrier},
+//!     sequence::Sequence,
+//! };
+//! use std::sync::Arc;
+//!
+//! // Define event type
+//! struct MyEvent;
+//!
+//! // Define handlers
+//! struct HandlerA;
+//! impl EventHandler<MyEvent> for HandlerA {
+//!     fn on_event(&self, _: &MyEvent, _: Sequence, _: bool) {}
+//!     fn on_start(&self) {}
+//!     fn on_shutdown(&self) {}
+//! }
+//!
+//! struct HandlerB;
+//! impl EventHandler<MyEvent> for HandlerB {
+//!     fn on_event(&self, _: &MyEvent, _: Sequence, _: bool) {}
+//!     fn on_start(&self) {}
+//!     fn on_shutdown(&self) {}
+//! }
+//!
+//! // Mock RingBuffer for example
+//! struct MockRingBuffer;
+//! impl DataProvider<MyEvent> for MockRingBuffer {
+//!     fn get_capacity(&self) -> usize {
+//!         1024 // Example fixed capacity
+//!     }
+//!
+//!     unsafe fn get(&self, _: Sequence) -> &MyEvent {
+//!         static EVENT: MyEvent = MyEvent;
+//!         &EVENT
+//!     }
+//!     unsafe fn get_mut(&self, _: Sequence) -> &mut MyEvent {
+//!         static mut EVENT: MyEvent = MyEvent;
+//!         &mut EVENT
+//!     }
+//! }
+//!
+//! // Mock Barrier for example
+//! struct MockBarrier;
+//! impl SequenceBarrier for MockBarrier {
+//!     fn wait_for(&self, seq: Sequence) -> Option<Sequence> {
+//!         Some(seq)
+//!     }
+//!     fn signal(&self) {}
+//! }
+//!
+//! // Create processors
 //! let processor_a = EventProcessorFactory::create(HandlerA);
 //! let processor_b = EventProcessorFactory::create(HandlerB);
 //!
 //! // Get processor A's sequence for processor B's barrier
 //! let seq_a = processor_a.get_sequence();
 //!
-//! // Create barriers with dependencies
-//! let barrier_a = ring_buffer.new_barrier();
-//! let barrier_b = ring_buffer.new_barrier_with_sequences(vec![seq_a]);
+//! // Create mock ring buffer
+//! let ring_buffer = Arc::new(MockRingBuffer);
+//!
+//! // Create barriers
+//! let barrier_a = MockBarrier;
+//! let barrier_b = MockBarrier;
 //!
 //! // Create runnables
 //! let runnable_a = processor_a.create(ring_buffer.clone(), barrier_a);
 //! let runnable_b = processor_b.create(ring_buffer.clone(), barrier_b);
 //!
-//! // Run processors
-//! std::thread::spawn(move || runnable_a.run());
-//! std::thread::spawn(move || runnable_b.run());
+//! // Example of running processors (commented out to avoid actual thread creation in doc tests)
+//! // std::thread::spawn(move || runnable_a.run());
+//! // std::thread::spawn(move || runnable_b.run());
 //! ```
 //!
 //! # Best Practices
@@ -96,31 +137,93 @@
 //!
 //! Handlers should manage their own error handling:
 //! ```rust
+//! # use disruptor_rs::{
+//! #     traits::EventHandler,
+//! #     sequence::Sequence,
+//! # };
+//!
+//! struct MyEvent;
+//! struct MyHandler;
+//!
+//! impl MyHandler {
+//!     fn process_event(&self, event: &MyEvent) -> Result<(), Box<dyn std::error::Error>> {
+//!         Ok(())
+//!     }
+//! }
+//!
 //! impl EventHandler<MyEvent> for MyHandler {
-//!     fn on_event(&self, event: &MyEvent, sequence: Sequence, end_of_batch: bool) {
-//!         match process_event(event) {
+//!     fn on_event(&self, event: &MyEvent, sequence: Sequence, _end_of_batch: bool) {
+//!         match self.process_event(event) {
 //!             Ok(_) => {
 //!                 // Normal processing
 //!             }
 //!             Err(e) => {
 //!                 // Log error but continue processing
-//!                 log::error!("Error processing event at {}: {:?}", sequence, e);
+//!                 println!("Error processing event at {}: {:?}", sequence, e);
 //!             }
 //!         }
 //!     }
+//!
+//!     fn on_start(&self) {}
+//!     fn on_shutdown(&self) {}
 //! }
 //! ```
 //!
 //! # Shutdown Handling
 //!
 //! Proper shutdown sequence:
-//! ```rust
+//! ```
+//! use disruptor_rs::{
+//!     processor::EventProcessorFactory,
+//!     traits::{EventHandler, Runnable, DataProvider, EventProcessor, SequenceBarrier},
+//!     sequence::Sequence,
+//! };
+//! use std::sync::Arc;
+//!
+//! struct MyEvent;
+//! struct MyHandler;
+//!
+//! impl EventHandler<MyEvent> for MyHandler {
+//!     fn on_event(&self, _: &MyEvent, _: Sequence, _: bool) {}
+//!     fn on_start(&self) {}
+//!     fn on_shutdown(&self) {}
+//! }
+//!
+//! struct MockBarrier;
+//! impl SequenceBarrier for MockBarrier {
+//!     fn wait_for(&self, seq: Sequence) -> Option<Sequence> {
+//!         Some(seq)
+//!     }
+//!     fn signal(&self) {}
+//! }
+//!
+//! // Mock RingBuffer for example
+//! struct MockRingBuffer;
+//! impl DataProvider<MyEvent> for MockRingBuffer {
+//!     fn get_capacity(&self) -> usize {
+//!         1024 // Example fixed capacity
+//!     }
+//!     unsafe fn get(&self, _: Sequence) -> &MyEvent {
+//!         static EVENT: MyEvent = MyEvent;
+//!         &EVENT
+//!     }
+//!     unsafe fn get_mut(&self, _: Sequence) -> &mut MyEvent {
+//!         static mut EVENT: MyEvent = MyEvent;
+//!         &mut EVENT
+//!     }
+//! }
+//!
+//! let barrier = MockBarrier;
+//! let ring_buffer = Arc::new(MockRingBuffer);
+//! let processor = EventProcessorFactory::create(MyHandler);
+//! let mut runnable = processor.create(ring_buffer, barrier);
+//!
 //! // Signal shutdown
 //! runnable.stop();
 //!
 //! // Wait for processing to complete
 //! while runnable.is_running() {
-//!     std::thread::sleep(std::time::Duration::from_millis(100));
+//!     std::thread::sleep(std::time::Duration::from_millis(1000));
 //! }
 //! ```
 
@@ -261,6 +364,6 @@ where
 
     fn is_running(&self) -> bool {
         self.running.load(std::sync::atomic::Ordering::Acquire)
-            != RunnableProcessorState::Idle as u8
+            == RunnableProcessorState::Running as u8
     }
 }

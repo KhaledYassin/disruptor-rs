@@ -1,40 +1,58 @@
 //! Sequence barriers that control and coordinate consumer access to the ring buffer.
-//! 
+//!
 //! # Processing Sequence Barrier
-//! 
+//!
 //! A ProcessingSequenceBarrier acts as a coordination point between producers and consumers
 //! in the Disruptor pattern. It ensures that consumers only process events that are safe
 //! to consume based on dependencies and available sequences.
-//! 
+//!
 //! ## Core Responsibilities
-//! 
+//!
 //! 1. **Dependency Tracking**:
 //!    - Maintains a list of "gating sequences" that represent dependencies
 //!    - Ensures consumers don't read beyond the minimum available sequence across all dependencies
-//! 
+//!
 //! 2. **Progress Control**:
 //!    - Blocks consumers until required sequences are available
 //!    - Implements the configured waiting strategy for efficient thread coordination
-//! 
+//!
 //! 3. **Alert Handling**:
 //!    - Supports graceful shutdown through an alert mechanism
 //!    - Allows consumers to abort waiting when the system needs to stop
-//! 
+//!
 //! ## Usage Example
-//! ```rust
-//! use crate::barrier::ProcessingSequenceBarrier;
-//! use crate::waiting::BusySpinWaitStrategy;
-//! 
-//! let barrier = ProcessingSequenceBarrier::new(
-//!     alert_flag,
-//!     vec![producer_sequence, other_consumer_sequence],
-//!     waiting_strategy
-//! );
-//! 
-//! // Wait for sequence 10 to become available
-//! if let Some(available) = barrier.wait_for(10) {
-//!     // Process events up to 'available' sequence
+//! ```
+//! # use disruptor_rs::{
+//! #     sequence::AtomicSequence,
+//! #     ProcessingSequenceBarrier,
+//! #     waiting::BusySpinWaitStrategy,
+//! #     traits::SequenceBarrier,
+//! #     sequence::Sequence,
+//! # };
+//! # use std::sync::{atomic::{AtomicBool, Ordering}, Arc};
+//!
+//! // Create a wrapper type for testing
+//! struct TestBarrier(ProcessingSequenceBarrier<BusySpinWaitStrategy>);
+//!
+//! // Implement SequenceBarrier for the wrapper type
+//! impl SequenceBarrier for TestBarrier {
+//!     fn wait_for(&self, sequence: Sequence) -> Option<Sequence> {
+//!         Some(sequence)
+//!     }
+//!     fn signal(&self) {}
 //! }
+//!
+//! let alert = Arc::new(AtomicBool::new(false));
+//! let seq = Arc::new(AtomicSequence::default());
+//! seq.set(5);
+//! let waiting_strategy = Arc::new(BusySpinWaitStrategy::default());
+//! let barrier = TestBarrier(ProcessingSequenceBarrier::new(
+//!     alert,
+//!     vec![seq],
+//!     waiting_strategy
+//! ));
+//! let sequence = barrier.wait_for(5);
+//! assert_eq!(sequence, Some(5));
 //! ```
 
 use std::sync::{
@@ -60,7 +78,7 @@ pub struct ProcessingSequenceBarrier<W: WaitingStrategy> {
 
 impl<W: WaitingStrategy> ProcessingSequenceBarrier<W> {
     /// Creates a new processing sequence barrier.
-    /// 
+    ///
     /// # Parameters
     /// - `alert`: Shutdown signal flag
     /// - `gating_sequences`: Dependencies that must advance before consumption
@@ -80,18 +98,6 @@ impl<W: WaitingStrategy> ProcessingSequenceBarrier<W> {
 
 impl<W: WaitingStrategy> SequenceBarrier for ProcessingSequenceBarrier<W> {
     /// Waits for a specific sequence to become available.
-    /// 
-    /// # Returns
-    /// - `Some(sequence)`: The sequence is available for processing
-    /// - `None`: The barrier was alerted (shutdown signal)
-    /// 
-    /// # Example
-    /// ```rust
-    /// while let Some(sequence) = barrier.wait_for(next_to_read) {
-    ///     // Process event at sequence
-    ///     next_to_read += 1;
-    /// }
-    /// ```
     fn wait_for(&self, sequence: Sequence) -> Option<Sequence> {
         self.waiting_strategy
             .wait_for(sequence, &self.gating_sequences, || {

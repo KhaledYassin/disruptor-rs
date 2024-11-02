@@ -29,7 +29,7 @@ use crate::{
 /// ```rust
 /// use disruptor_rs::{
 ///     DisruptorBuilder, EventHandler, EventProcessorExecutor, EventProducer,
-///     internal::Sequence,
+///     sequence::Sequence,
 /// };
 ///
 /// #[derive(Default)]
@@ -67,7 +67,7 @@ use crate::{
 /// ```rust
 /// use disruptor_rs::{
 ///     DisruptorBuilder, EventHandler, EventProcessorExecutor, EventProducer,
-///     internal::Sequence,
+///     sequence::Sequence,
 /// };
 ///
 /// #[derive(Default)]

@@ -93,7 +93,7 @@ producer.drain();
 handle.join();
 ```
 
-## 6. Performance Considerations
+## Performance Considerations
 
 - **Ring Buffer Size**: Must be a power of 2
 - **Waiting Strategy**: Choose based on your latency/CPU trade-offs

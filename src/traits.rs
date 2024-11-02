@@ -29,7 +29,7 @@
 //! # Examples
 //!
 //! ```rust
-//! use distruptor::{EventHandler, Sequence};
+//! use disruptor_rs::{EventHandler, sequence::Sequence};
 //!
 //! struct MyHandler;
 //! impl EventHandler<i64> for MyHandler {
@@ -96,12 +96,30 @@ pub trait Sequencer {
 /// # Examples
 ///
 /// ```
-/// use distruptor::WaitingStrategy;
+/// use disruptor_rs::traits::WaitingStrategy;
+/// use disruptor_rs::sequence::AtomicSequence;
 ///
+/// #[derive(Default)]
 /// struct BlockingWaitStrategy;
 ///
 /// impl WaitingStrategy for BlockingWaitStrategy {
-///     // Implementation details...
+///     fn new() -> Self {
+///         BlockingWaitStrategy
+///     }
+///
+///     fn wait_for<F: Fn() -> bool>(
+///         &self,
+///         sequence: i64,
+///         dependencies: &[std::sync::Arc<AtomicSequence>],
+///         check_alert: F
+///     ) -> Option<i64> {
+///         // Implementation would go here
+///         None
+///     }
+///
+///     fn signal_all_when_blocking(&self) {
+///         // Implementation would go here
+///     }
 /// }
 /// ```
 ///
