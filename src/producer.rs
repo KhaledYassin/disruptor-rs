@@ -15,10 +15,20 @@
 //! # Usage Example
 //!
 //! ``` rust
-//! use my_disruptor::{RingBuffer, Producer, SingleProducerSequencer};
+//! use std::sync::Arc;
+//! use disruptor_rs::{
+//!     ringbuffer::RingBuffer,
+//!     sequencer::SingleProducerSequencer,
+//!     waiting::BusySpinWaitStrategy,
+//!     producer::Producer,
+//!     traits::EventProducer,
+//! };
 //!
+//! let ring_buffer = Arc::new(RingBuffer::new(1024));
+//! let waiting_strategy = BusySpinWaitStrategy::default();
+//! let sequencer = SingleProducerSequencer::new(ring_buffer.get_capacity(), waiting_strategy);
 //! // Create a producer
-//! let producer = Producer::new(
+//! let mut producer = Producer::new(
 //!     ring_buffer.clone(),
 //!     sequencer
 //! );
@@ -27,7 +37,7 @@
 //! producer.write(
 //!     std::iter::once(42),
 //!     |event, sequence, &value| {
-//!         event.data = value;
+//!         *event = value;
 //!     }
 //! );
 //!
@@ -36,7 +46,7 @@
 //! producer.write(
 //!     batch,
 //!     |event, sequence, &value| {
-//!         event.data = value;
+//!         *event = value;
 //!     }
 //! );
 //! ```
@@ -65,6 +75,19 @@
 //!
 //! ``` rust
 //! // Ensure all events are published
+//! use std::sync::Arc;
+//! use disruptor_rs::{
+//!     ringbuffer::RingBuffer,
+//!     sequencer::SingleProducerSequencer,
+//!     waiting::BusySpinWaitStrategy,
+//!     producer::Producer,
+//!     traits::EventProducer,
+//! };
+//!
+//! let ring_buffer = Arc::new(RingBuffer::<i64>::new(1024));
+//! let waiting_strategy = BusySpinWaitStrategy::default();
+//! let sequencer = SingleProducerSequencer::new(ring_buffer.get_capacity(), waiting_strategy);
+//! let mut producer = Producer::new(ring_buffer, sequencer);
 //! producer.drain();
 //! ```
 

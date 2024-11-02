@@ -23,8 +23,10 @@
 //!
 //! # Usage Example
 //! ```rust
-//! use crate::sequencer::SingleProducerSequencer;
-//! use crate::waiting::BusySpinWaitStrategy;
+//! use disruptor_rs::{
+//!     sequencer::SingleProducerSequencer,
+//!     waiting::BusySpinWaitStrategy,
+//! };
 //!
 //! // Create a sequencer with a buffer of 1024 slots
 //! let sequencer = SingleProducerSequencer::new(1024, BusySpinWaitStrategy);
