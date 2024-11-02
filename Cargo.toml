@@ -1,5 +1,13 @@
 [package]
 name = "disruptor-rs"
+description = "A high-performance ring buffer implementation of the LMAX Disruptor pattern"
+authors = ["Your Name <your.email@example.com>"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/khaledyassin/disruptor-rs"
+documentation = "https://docs.rs/disruptor-rs"
+readme = "README.md"
+keywords = ["disruptor", "ring-buffer", "concurrent", "lock-free", "high-performance"]
+categories = ["concurrency", "data-structures"]
 version = "0.1.0"
 edition = "2021"
 
