@@ -1,26 +1,26 @@
 //! Atomic sequence counters with cache line padding to prevent false sharing.
-//! 
+//!
 //! # Cache Line Padding and False Sharing
-//! 
+//!
 //! ## The Problem
 //! Modern CPU architectures manage memory in cache lines (typically 64 bytes). When multiple
 //! threads operate on variables that live in the same cache line but on different cores:
-//! 
+//!
 //! 1. Any modification to a variable invalidates the entire cache line
 //! 2. All cores must refresh their cache line copy, even if they only use unmodified variables
 //! 3. This "false sharing" creates unnecessary cache coherence traffic and severely impacts performance
-//! 
+//!
 //! ## The Solution
 //! The `AtomicSequence` is carefully structured to occupy its own cache line by:
 //! 1. Using explicit padding bytes to fill a complete cache line
 //! 2. Ensuring 64-byte alignment through `#[repr(align(64))]`
-//! 
+//!
 //! This isolation is crucial for the Disruptor's performance as sequences are frequently
 //! accessed and modified by different threads:
 //! - Publishers increment their sequences
 //! - Consumers read sequences to track progress
 //! - Gating sequences are monitored for backpressure
-//! 
+//!
 //! Without padding, these concurrent operations would cause constant cache line invalidations
 //! and significantly reduce throughput.
 
@@ -34,7 +34,7 @@ const CACHE_LINE_SIZE: usize = 64;
 const CACHE_LINE_PADDING: usize = CACHE_LINE_SIZE - std::mem::size_of::<AtomicI64>();
 
 /// An atomic sequence counter padded to occupy a full cache line.
-/// 
+///
 /// # Memory Layout
 /// ```text
 /// |------------------------------------------|
@@ -43,12 +43,12 @@ const CACHE_LINE_PADDING: usize = CACHE_LINE_SIZE - std::mem::size_of::<AtomicI6
 /// ^                                          ^
 /// Cache line start                    Cache line end
 /// ```
-/// 
+///
 /// # Performance Characteristics
 /// - Aligned to cache line boundaries (64 bytes)
 /// - Isolated from other memory locations to prevent false sharing
 /// - Atomic operations use appropriate memory ordering for consistency
-/// 
+///
 /// # Usage in the Disruptor
 /// Sequences are used throughout the Disruptor for various purposes:
 /// - Tracking producer position in the ring buffer
