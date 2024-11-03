@@ -6,3 +6,15 @@
 
 # Build artifacts
 Cargo.lock
+
+# Coverage reports
+lcov.info
+coverage_report.json
+coverage-summary.txt
+
+# Tarpaulin reports
+tarpaulin-report.html
+
+# Local Secrets
+.env
+.secrets

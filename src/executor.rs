@@ -18,7 +18,7 @@ impl<'a> EventProcessorExecutor<'a> for ThreadedExecutor<'a> {
     fn spawn(self) -> Self::Handle {
         let mut threads = Vec::new();
         for r in self.runnables.into_iter() {
-            let b = unsafe {
+            let mut b = unsafe {
                 // SAFETY: The runnable is guaranteed to be Send.
                 std::mem::transmute::<Box<dyn Runnable + 'a>, Box<dyn Runnable + 'static>>(r)
             };

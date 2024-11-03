@@ -8,6 +8,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  MIN_COVERAGE: 80
 
 jobs:
   test:
@@ -27,6 +28,93 @@ jobs:
 
       - name: Run benchmarks
         run: cargo bench
+
+  coverage:
+    name: Code Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+        
+      - name: Install grcov
+        run: cargo install grcov
+        
+      - name: Install cargo-llvm-cov
+        run: cargo install cargo-llvm-cov
+
+      - name: Build project
+        run: cargo build --all-features
+
+      - name: Generate coverage report
+        run: |
+          # Create necessary directories
+          mkdir -p target/debug
+          mkdir -p coverage-results
+          
+          # Generate coverage data
+          LLVM_PROFILE_FILE="coverage-%p-%m.profraw" cargo llvm-cov test --all-features
+          
+          # Generate reports in multiple formats
+          cargo llvm-cov report --lcov --output-path coverage-results/lcov.info
+          
+          # Ensure target directory exists before running grcov
+          if [ -d "target/debug" ]; then
+            grcov . --binary-path ./target/debug/ -s . -t lcov --branch --ignore-not-existing --ignore "/*" -o coverage-results/coverage.lcov
+          else
+            echo "target/debug directory not found, creating coverage.lcov from llvm-cov"
+            cp coverage-results/lcov.info coverage-results/coverage.lcov
+          fi
+          
+          # Calculate coverage percentage
+          COVERAGE=$(cargo llvm-cov report | grep -E '^Total:' | awk '{print $3}' | sed 's/%//')
+          echo "COVERAGE=$COVERAGE" >> $GITHUB_ENV
+          
+          if [ "$COVERAGE" -lt "$MIN_COVERAGE" ]; then
+            echo "❌ Code coverage is ${COVERAGE}%, which is below the required ${MIN_COVERAGE}%"
+            echo "Coverage Report:"
+            echo "----------------"
+            cargo llvm-cov report
+            echo "----------------"
+            echo "Required coverage: ${MIN_COVERAGE}%"
+            echo "Actual coverage: ${COVERAGE}%"
+            echo "Coverage must be increased by at least $((MIN_COVERAGE - COVERAGE))%"
+            exit 1
+          else
+            echo "✅ Code coverage is ${COVERAGE}%, which meets the minimum requirement of ${MIN_COVERAGE}%"
+          fi
+          
+          # Local save of reports when running with act
+          if [ -n "${ACT:-}" ]; then
+            mkdir -p ./artifacts
+            cp coverage-results/* ./artifacts/
+          fi
+
+      - name: Upload to codecov.io
+        if: ${{ !env.ACT }}  # Skip during local act runs
+        uses: codecov/codecov-action@v3
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage-results/coverage.lcov
+          fail_ci_if_error: true
+          verbose: true
+
+      - name: Archive code coverage results
+        if: ${{ !env.ACT }}  # Skip during local act runs
+        uses: actions/upload-artifact@v3
+        with:
+          name: code-coverage-report
+          path: coverage-results/
+          retention-days: 14
+
+      - name: Local artifacts save
+        if: ${{ env.ACT }}
+        run: |
+          echo "Coverage reports saved to ./artifacts directory"
+          ls -la ./artifacts
 
   lint:
     name: Lint
