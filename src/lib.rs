@@ -38,6 +38,20 @@ mod tests {
         fn on_shutdown(&self) {}
     }
 
+    impl EventHandlerMut<i64> for Checker {
+        fn on_event(&mut self, data: &i64, sequence: Sequence, _: bool) {
+            if *data != sequence {
+                dbg!(*data);
+                dbg!(sequence);
+                panic!();
+            }
+        }
+
+        fn on_start(&mut self) {}
+
+        fn on_shutdown(&mut self) {}
+    }
+
     #[test]
     fn test_dsl() {
         let data_provider = Arc::new(RingBuffer::new(4096));
@@ -46,6 +60,29 @@ mod tests {
             .with_single_producer_sequencer()
             .with_barrier(|b| {
                 b.handle_events(Checker {});
+            })
+            .build();
+
+        let handle = executor.spawn();
+        for _ in 0..10_000 {
+            let buffer: Vec<_> = std::iter::repeat(1).take(1000).collect();
+            producer.write(buffer, |slot, seq, _| {
+                *slot = seq;
+            });
+        }
+        println!("Draining");
+        producer.drain();
+        handle.join();
+    }
+
+    #[test]
+    fn test_dsl_mut() {
+        let data_provider = Arc::new(RingBuffer::new(4096));
+        let (executor, mut producer) = builder::DisruptorBuilder::new(data_provider)
+            .with_busy_spin_waiting_strategy()
+            .with_single_producer_sequencer()
+            .with_barrier(|b| {
+                b.handle_events_mut(Checker {});
             })
             .build();
 

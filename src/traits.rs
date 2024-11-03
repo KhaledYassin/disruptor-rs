@@ -175,7 +175,7 @@ pub trait DataProvider<T>: Send + Sync {
 /// * `stop` - Stops the component
 /// * `is_running` - Checks if the component is running
 pub trait Runnable: Send {
-    fn run(&self);
+    fn run(&mut self);
     fn stop(&mut self);
     fn is_running(&self) -> bool;
 }
@@ -196,6 +196,17 @@ pub trait EventProcessor<'a, T> {
     fn get_sequence(&self) -> Arc<AtomicSequence>;
 }
 
+/// A trait for providing an event processor with mutable access to the event.
+pub trait EventProcessorMut<'a, T> {
+    fn get_cursor(&self) -> Arc<AtomicSequence>;
+    fn create<D: DataProvider<T> + 'a, S: SequenceBarrier + 'a>(
+        self,
+        data_provider: Arc<D>,
+        barrier: S,
+    ) -> Box<dyn Runnable + 'a>;
+    fn get_sequence(&self) -> Arc<AtomicSequence>;
+}
+
 /// A trait for providing an event handler.
 /// # Types
 /// - `T`: The type of events to handle.
@@ -207,6 +218,19 @@ pub trait EventHandler<T> {
     fn on_event(&self, event: &T, sequence: Sequence, end_of_batch: bool);
     fn on_start(&self);
     fn on_shutdown(&self);
+}
+
+/// A trait for providing an event handler with mutable access to the event.
+/// # Types
+/// - `T`: The type of events to handle.
+/// # Methods
+/// * `on_event`: Handles the given event.
+/// * `on_start`: Called when the event handler starts.
+/// * `on_shutdown`: Called when the event handler shuts down.
+pub trait EventHandlerMut<T> {
+    fn on_event(&mut self, event: &T, sequence: Sequence, end_of_batch: bool);
+    fn on_start(&mut self);
+    fn on_shutdown(&mut self);
 }
 
 /// A trait for providing an executor thread handle.

@@ -12,6 +12,7 @@ use crate::{
         Runnable, Sequencer, WaitingStrategy,
     },
     waiting::{BusySpinWaitStrategy, YieldingWaitStrategy},
+    EventHandlerMut, EventProcessorMut,
 };
 
 /// # Disruptor Builder Pattern Guide
@@ -245,7 +246,24 @@ impl<'a, S: Sequencer + 'a, D: DataProvider<T> + 'a, T: Send + 'a> BarrierScope<
         self.handle_events_with(EventProcessorFactory::create(handler));
     }
 
+    pub fn handle_events_mut<E>(&mut self, handler: E)
+    where
+        E: EventHandlerMut<T> + Send + 'a,
+    {
+        self.handle_events_with_mut(EventProcessorFactory::create_mut(handler));
+    }
+
     pub fn handle_events_with<E: EventProcessor<'a, T>>(&mut self, processor: E) {
+        self.cursors.push(processor.get_cursor());
+        let barrier = self
+            .sequencer
+            .create_sequence_barrier(&self.gating_sequences);
+
+        let runnable = processor.create(self.data_provider.clone(), barrier);
+        self.event_handlers.push(runnable);
+    }
+
+    pub fn handle_events_with_mut<E: EventProcessorMut<'a, T>>(&mut self, processor: E) {
         self.cursors.push(processor.get_cursor());
         let barrier = self
             .sequencer
