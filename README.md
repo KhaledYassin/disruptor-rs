@@ -1,6 +1,6 @@
 # Disruptor-rs
 
-[![Build Status](https://github.com/khaledyassin/disruptor-rs/workflows/Rust/badge.svg)](https://github.com/khaledyassin/disruptor-rs/actions/workflows/ci.yml)
+[![Build Status](https://github.com/khaledyassin/disruptor-rs/workflows/CI/badge.svg)](https://github.com/khaledyassin/disruptor-rs/actions/workflows/ci.yml)
 [![Code Coverage](https://codecov.io/gh/khaledyassin/disruptor-rs/branch/main/graph/badge.svg)](https://codecov.io/gh/khaledyassin/disruptor-rs)
 [![Crates.io](https://img.shields.io/crates/v/disruptor-rs.svg)](https://crates.io/crates/disruptor-rs)
 [![Documentation](https://docs.rs/disruptor-rs/badge.svg)](https://docs.rs/disruptor-rs)
