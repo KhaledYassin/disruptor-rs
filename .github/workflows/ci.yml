@@ -8,6 +8,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  MIN_COVERAGE: 80
 
 jobs:
   test:
@@ -27,6 +28,49 @@ jobs:
 
       - name: Run benchmarks
         run: cargo bench
+
+  coverage:
+    name: Code Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        
+      - name: Install cargo-tarpaulin
+        uses: actions-rs/install@v0.1
+        with:
+          crate: cargo-tarpaulin
+          version: latest
+          use-tool-cache: true
+
+      - name: Generate coverage report
+        run: |
+          COVERAGE_OUTPUT=$(cargo tarpaulin --verbose --all-features --workspace --timeout 120 --out json)
+          echo "$COVERAGE_OUTPUT" > coverage_report.json
+          COVERAGE=$(echo "$COVERAGE_OUTPUT" | jq -r '.coverage' | cut -d'.' -f1)
+          echo "COVERAGE=$COVERAGE" >> $GITHUB_ENV
+          
+          if [ "$COVERAGE" -lt "$MIN_COVERAGE" ]; then
+            echo "❌ Code coverage is ${COVERAGE}%, which is below the required ${MIN_COVERAGE}%"
+            echo "Coverage Report:"
+            echo "----------------"
+            cargo tarpaulin --verbose --all-features --workspace --timeout 120 --out text
+            echo "----------------"
+            echo "Required coverage: ${MIN_COVERAGE}%"
+            echo "Actual coverage: ${COVERAGE}%"
+            echo "Coverage must be increased by at least $((MIN_COVERAGE - COVERAGE))%"
+            exit 1
+          else
+            echo "✅ Code coverage is ${COVERAGE}%, which meets the minimum requirement of ${MIN_COVERAGE}%"
+          fi
+
+      - name: Upload to codecov.io
+        uses: codecov/codecov-action@v3
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: true
 
   lint:
     name: Lint

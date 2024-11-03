@@ -1,5 +1,12 @@
 # Disruptor-rs
 
+[![Build Status](https://github.com/khaledyassin/disruptor-rs/workflows/Rust/badge.svg)](https://github.com/khaledyassin/disruptor-rs/actions/workflows/rust.yml)
+[![Code Coverage](https://codecov.io/gh/khaledyassin/disruptor-rs/branch/main/graph/badge.svg)](https://codecov.io/gh/khaledyassin/disruptor-rs)
+[![Crates.io](https://img.shields.io/crates/v/disruptor-rs.svg)](https://crates.io/crates/disruptor-rs)
+[![Documentation](https://docs.rs/disruptor-rs/badge.svg)](https://docs.rs/disruptor-rs)
+[![License](https://img.shields.io/crates/l/disruptor-rs.svg)](LICENSE)
+[![Rust Version](https://img.shields.io/badge/rust-1.70%2B-blue.svg)](https://www.rust-lang.org)
+
 A heavily documented Rust implementation of the LMAX Disruptor pattern, focused on high-performance inter-thread messaging.
 
 ## Origins & Purpose

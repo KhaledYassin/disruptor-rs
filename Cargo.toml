@@ -1,7 +1,7 @@
 [package]
 name = "disruptor-rs"
 description = "A high-performance ring buffer implementation of the LMAX Disruptor pattern"
-authors = ["Your Name <your.email@example.com>"]
+authors = ["Khaled Yassin <khaled.yassin.95@hotmail.com>"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/khaledyassin/disruptor-rs"
 documentation = "https://docs.rs/disruptor-rs"
@@ -17,6 +17,7 @@ crossbeam-channel = "0.5.13"
 
 [dev-dependencies]
 criterion = "0.5"
+cargo-llvm-cov = "0.5"
 
 [[bench]]
 name = "throughput"
