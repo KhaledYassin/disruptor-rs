@@ -55,7 +55,7 @@ mod tests {
     #[test]
     fn test_dsl() {
         let data_provider = Arc::new(RingBuffer::new(4096));
-        let (executor, mut producer) = builder::DisruptorBuilder::new(data_provider)
+        let (executor, producer) = builder::DisruptorBuilder::new(data_provider)
             .with_busy_spin_waiting_strategy()
             .with_single_producer_sequencer()
             .with_barrier(|b| {
@@ -78,7 +78,7 @@ mod tests {
     #[test]
     fn test_dsl_mut() {
         let data_provider = Arc::new(RingBuffer::new(4096));
-        let (executor, mut producer) = builder::DisruptorBuilder::new(data_provider)
+        let (executor, producer) = builder::DisruptorBuilder::new(data_provider)
             .with_busy_spin_waiting_strategy()
             .with_single_producer_sequencer()
             .with_barrier(|b| {
@@ -95,6 +95,61 @@ mod tests {
         }
         println!("Draining");
         producer.drain();
+        handle.join();
+    }
+
+    #[test]
+    fn test_multi_producer() {
+        let data_provider = Arc::new(RingBuffer::new(4096));
+        let (executor, producer) = builder::DisruptorBuilder::new(data_provider)
+            .with_busy_spin_waiting_strategy()
+            .with_multi_producer_sequencer()
+            .with_barrier(|b| {
+                b.handle_events(Checker {});
+            })
+            .build();
+
+        let handle = executor.spawn();
+
+        let producer_arc = Arc::new(producer);
+        let producer1 = producer_arc.clone();
+        let producer2 = producer_arc.clone();
+        let producer3 = producer_arc.clone();
+
+        let p1 = std::thread::spawn(move || {
+            for _ in 0..10_000 {
+                let buffer: Vec<_> = std::iter::repeat(1).take(1000).collect();
+                producer1.write(buffer, |slot, seq, _| {
+                    *slot = seq;
+                });
+            }
+        });
+
+        let p2 = std::thread::spawn(move || {
+            for _ in 0..10_000 {
+                let buffer: Vec<_> = std::iter::repeat(2).take(1000).collect();
+                producer2.write(buffer, |slot, seq, _| {
+                    *slot = seq;
+                });
+            }
+        });
+
+        let p3 = std::thread::spawn(move || {
+            for _ in 0..10_000 {
+                let buffer: Vec<_> = std::iter::repeat(3).take(1000).collect();
+                producer3.write(buffer, |slot, seq, _| {
+                    *slot = seq;
+                });
+            }
+        });
+
+        p1.join().unwrap();
+        p2.join().unwrap();
+        p3.join().unwrap();
+        if let Ok(producer) = Arc::try_unwrap(producer_arc) {
+            producer.drain();
+        }
+
         handle.join();
     }
 }

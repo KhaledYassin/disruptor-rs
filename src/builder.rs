@@ -6,7 +6,7 @@ use crate::{
     producer::Producer,
     ringbuffer::RingBuffer,
     sequence::AtomicSequence,
-    sequencer::SingleProducerSequencer,
+    sequencer::{MultiProducerSequencer, SingleProducerSequencer},
     traits::{
         DataProvider, EventHandler, EventProcessor, EventProcessorExecutor, EventProducer,
         Runnable, Sequencer, WaitingStrategy,
@@ -201,6 +201,13 @@ where
     ) -> WithSequencer<SingleProducerSequencer<W>, W, D, T> {
         let buffer_size = self.with_data_provider.data_provider.get_capacity();
         self.with_sequencer(SingleProducerSequencer::new(buffer_size, W::new()))
+    }
+
+    pub fn with_multi_producer_sequencer(
+        self,
+    ) -> WithSequencer<MultiProducerSequencer<W>, W, D, T> {
+        let buffer_size = self.with_data_provider.data_provider.get_capacity();
+        self.with_sequencer(MultiProducerSequencer::new(buffer_size, W::new()))
     }
 }
 
