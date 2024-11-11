@@ -105,7 +105,7 @@ mod tests {
             .with_busy_spin_waiting_strategy()
             .with_multi_producer_sequencer()
             .with_barrier(|b| {
-                b.handle_events(Checker {});
+                b.handle_events_mut(Checker {});
             })
             .build();
 

@@ -167,7 +167,7 @@ impl<W: WaitingStrategy> Drop for SingleProducerSequencer<W> {
 pub struct MultiProducerSequencer<W: WaitingStrategy> {
     buffer_size: i64,
     cursor: Arc<AtomicSequence>,
-    high_water_mark: Arc<AtomicSequence>,
+    high_water_mark: AtomicSequence,
     gating_sequences: Vec<Arc<AtomicSequence>>,
     waiting_strategy: Arc<W>,
     is_done: Arc<AtomicBool>,
@@ -179,7 +179,7 @@ impl<W: WaitingStrategy> MultiProducerSequencer<W> {
         Self {
             buffer_size: buffer_size as i64,
             cursor: Arc::new(AtomicSequence::default()),
-            high_water_mark: Arc::new(AtomicSequence::default()),
+            high_water_mark: AtomicSequence::default(),
             gating_sequences: Vec::new(),
             waiting_strategy: Arc::new(waiting_strategy),
             is_done: Arc::new(AtomicBool::new(false)),
@@ -212,28 +212,12 @@ impl<W: WaitingStrategy> Sequencer for MultiProducerSequencer<W> {
         self.cursor.clone()
     }
 
-    // fn next(&self, n: Sequence) -> (Sequence, Sequence) {
-    //     loop {
-    //         let high_water_mark = self.high_water_mark.get();
-
-    //         self.waiting_strategy.wait_for(
-    //             high_water_mark + n - self.buffer_size,
-    //             &self.gating_sequences,
-    //             || false,
-    //         );
-
-    //         let end = high_water_mark + n;
-    //         if self.high_water_mark.compare_and_set(high_water_mark, end) {
-    //             return (high_water_mark + 1, end);
-    //         }
-    //     }
-    // }
-
     fn next(&self, n: Sequence) -> (Sequence, Sequence) {
         loop {
             let high_water_mark = self.high_water_mark.get();
-            let minimum_sequence = Utils::get_minimum_sequence(&self.gating_sequences);
-            if high_water_mark + n - minimum_sequence < self.buffer_size {
+            if high_water_mark + n - Utils::get_minimum_sequence(&self.gating_sequences)
+                < self.buffer_size
+            {
                 let end = high_water_mark + n;
                 if self.high_water_mark.compare_and_set(high_water_mark, end) {
                     return (high_water_mark + 1, end);
