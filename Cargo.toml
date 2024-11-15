@@ -8,7 +8,7 @@ documentation = "https://docs.rs/disruptor-rs"
 readme = "README.md"
 keywords = ["disruptor", "ring-buffer", "concurrent", "lock-free", "high-performance"]
 categories = ["concurrency", "data-structures"]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 
 [dependencies]
