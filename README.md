@@ -17,6 +17,10 @@ This project is a fork of [disrustor](https://github.com/sklose/disrustor) by Se
 2. Rewrite the implementation in a more idiomatic Rust style
 3. Create a production-ready, Rust-native package for the community
 
+## Important Differences from the original implementation
+
+- The most important difference is that this implementation is that the `Sequencer` uses `WaitingStrategy` to get coordinate between the sequences instead of the default implied busy-spinning. This makes the disruptor more consistent and potentially more performant and efficient in its CPU usage.
+
 ## What is the Disruptor?
 
 The Disruptor is a high-performance inter-thread messaging library, originally developed by LMAX Exchange for their financial trading platform. It achieves superior performance through:
