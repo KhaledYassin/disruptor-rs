@@ -1,4 +1,8 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{
+    black_box, criterion_group, criterion_main, BenchmarkId, Criterion, SamplingMode, Throughput,
+};
+use disruptor_rs::ringbuffer::RingBuffer;
+use disruptor_rs::EventHandlerMut;
 use disruptor_rs::{
     sequence::Sequence, DisruptorBuilder, EventHandler, EventProcessorExecutor, EventProducer,
     ExecutorHandle,
@@ -8,244 +12,212 @@ use std::thread;
 use std::time::Duration;
 
 const BUFFER_SIZE: usize = 65536;
-const ITERATIONS: usize = 1_000_000;
-const BATCH_SIZE: usize = 100;
+const ELEMENTS: usize = 1_000_000;
 
 const PRODUCER_COUNT: usize = 3;
 const CONSUMER_COUNT: usize = 3;
-struct TestSingleHandler;
+struct Checker;
 
-impl EventHandler<i64> for TestSingleHandler {
-    fn on_event(&self, event: &i64, sequence: Sequence, _end_of_batch: bool) {
-        assert_eq!(*event, sequence);
+impl EventHandler<i64> for Checker {
+    fn on_event(&self, _event: &i64, _sequence: Sequence, _end_of_batch: bool) {
+        assert_eq!(*_event, _sequence);
     }
+
     fn on_start(&self) {}
     fn on_shutdown(&self) {}
 }
 
-struct TestMultiHandler;
+impl EventHandlerMut<i64> for Checker {
+    fn on_event(&mut self, _event: &i64, _sequence: Sequence, _end_of_batch: bool) {}
 
-impl EventHandler<i64> for TestMultiHandler {
-    fn on_event(&self, _event: &i64, _sequence: Sequence, _end_of_batch: bool) {}
-    fn on_start(&self) {}
-    fn on_shutdown(&self) {}
+    fn on_start(&mut self) {}
+    fn on_shutdown(&mut self) {}
 }
 
-fn bench_channel_spsc(c: &mut Criterion) {
-    c.bench_function("channel_spsc", |b| {
-        b.iter(|| {
-            let (tx, rx) = mpsc::channel();
-            let handle = thread::spawn(move || {
-                while let Ok(batch) = rx.recv() {
-                    black_box(batch);
-                }
-            });
+fn throughput_single_producer_single_consumer(c: &mut Criterion) {
+    let mut group = c.benchmark_group("spsc");
+    group.throughput(Throughput::Elements(ELEMENTS as u64));
+    group.warm_up_time(Duration::from_secs(10));
+    group.sampling_mode(SamplingMode::Flat);
 
-            // Batch write for better performance
-            for chunk in (0..ITERATIONS).step_by(BATCH_SIZE) {
-                let end = (chunk + BATCH_SIZE).min(ITERATIONS);
-                let batch: Vec<_> = (chunk..end).map(|i| i as i64).collect();
+    for batch_size in [1, 10, 100, 1000] {
+        group.bench_with_input(
+            BenchmarkId::from_parameter(batch_size),
+            &batch_size,
+            |b, &batch_size| {
+                b.iter(|| {
+                    let (tx, rx) = mpsc::channel();
+                    let producer = thread::spawn(move || {
+                        for chunk in (0..ELEMENTS).step_by(batch_size) {
+                            let end = (chunk + batch_size).min(ELEMENTS);
+                            let batch = (chunk..end).collect::<Vec<_>>();
+                            tx.send(batch).unwrap();
+                        }
+                    });
 
-                tx.send(batch).unwrap();
-            }
+                    let consumer = thread::spawn(move || {
+                        while let Ok(batch) = rx.recv() {
+                            black_box(batch);
+                        }
+                    });
 
-            // Ensure all messages are processed
-            drop(tx); // Close the sender to unblock the receiver
-            handle.join().unwrap();
-        })
-    });
-}
-
-fn bench_disruptor_spsc(c: &mut Criterion) {
-    c.bench_function("disruptor_spsc", |b| {
-        b.iter(|| {
-            let handler = TestSingleHandler;
-
-            let (executor, producer) = DisruptorBuilder::with_ring_buffer(BUFFER_SIZE)
-                .with_busy_spin_waiting_strategy()
-                .with_single_producer_sequencer()
-                .with_barrier(|b| {
-                    b.handle_events(handler);
-                })
-                .build();
-
-            let handle = executor.spawn();
-
-            // Batch write for better performance
-            for chunk in (0..ITERATIONS).step_by(BATCH_SIZE) {
-                let end = (chunk + BATCH_SIZE).min(ITERATIONS);
-                let batch: Vec<_> = (chunk..end).map(|i| i as i64).collect();
-
-                producer.write(batch, |slot, _seq, &value| {
-                    *slot = value;
+                    let _ = producer.join();
+                    let _ = consumer.join();
                 });
-            }
+            },
+        );
+    }
+    group.finish();
 
-            producer.drain();
-            handle.join();
-        })
-    });
-}
+    let mut group = c.benchmark_group("spsc_disruptor");
+    group.throughput(Throughput::Elements(ELEMENTS as u64));
+    group.warm_up_time(Duration::from_secs(10));
+    group.sampling_mode(SamplingMode::Flat);
+    for batch_size in [1, 10, 100, 1000] {
+        group.bench_with_input(
+            BenchmarkId::from_parameter(batch_size),
+            &batch_size,
+            |b, &batch_size| {
+                b.iter(|| {
+                    let data_provider = Arc::new(RingBuffer::new(BUFFER_SIZE));
+                    let (executor, producer) = DisruptorBuilder::new(data_provider)
+                        .with_busy_spin_waiting_strategy()
+                        .with_single_producer_sequencer()
+                        .with_barrier(|b| {
+                            b.handle_events(Checker {});
+                        })
+                        .build();
 
-fn bench_channel_spmc(c: &mut Criterion) {
-    c.bench_function("channel_spmc", |b| {
-        b.iter(|| {
-            let (tx, rx) = crossbeam_channel::bounded(BUFFER_SIZE);
-            let rx = std::sync::Arc::new(rx);
-
-            let mut handles = vec![];
-
-            for _ in 0..CONSUMER_COUNT {
-                let rx = rx.clone();
-                handles.push(thread::spawn(move || {
-                    while let Ok(batch) = rx.recv() {
-                        black_box(batch);
+                    let handle = executor.spawn();
+                    for chunk in (0..ELEMENTS).step_by(batch_size) {
+                        let end = (chunk + batch_size).min(ELEMENTS);
+                        let batch = (chunk..end).collect::<Vec<_>>();
+                        producer.write(batch, |slot, seq, _| *slot = seq);
                     }
-                }));
-            }
-
-            for chunk in (0..ITERATIONS).step_by(BATCH_SIZE) {
-                let end = (chunk + BATCH_SIZE).min(ITERATIONS);
-                let batch: Vec<_> = (chunk..end).map(|i| i as i64).collect();
-
-                tx.send(batch).unwrap();
-            }
-
-            for handle in handles {
-                handle.join().unwrap();
-            }
-        })
-    });
-}
-
-fn bench_disruptor_spmc(c: &mut Criterion) {
-    c.bench_function("disruptor_spmc", |b| {
-        b.iter(|| {
-            let (executor, producer) = DisruptorBuilder::with_ring_buffer(BUFFER_SIZE)
-                .with_busy_spin_waiting_strategy()
-                .with_single_producer_sequencer()
-                .with_barrier(|b| {
-                    for _ in 0..CONSUMER_COUNT {
-                        b.handle_events(TestSingleHandler);
-                    }
-                })
-                .build();
-
-            let handle = executor.spawn();
-
-            for chunk in (0..ITERATIONS).step_by(BATCH_SIZE) {
-                let end = (chunk + BATCH_SIZE).min(ITERATIONS);
-                let batch: Vec<_> = (chunk..end).map(|i| i as i64).collect();
-
-                producer.write(batch, |slot, _seq, &value| {
-                    *slot = value;
+                    producer.drain();
+                    handle.join();
                 });
-            }
-
-            producer.drain();
-            handle.join();
-        })
-    });
+            },
+        );
+    }
+    group.finish();
 }
 
-fn bench_channel_mpmc(c: &mut Criterion) {
-    c.bench_function("channel_mpmc", |b| {
-        b.iter(|| {
-            let (tx, rx) = crossbeam_channel::bounded(BUFFER_SIZE);
-            let tx = std::sync::Arc::new(tx);
-            let rx = std::sync::Arc::new(rx);
+fn throughput_multi_producer_multi_consumer(c: &mut Criterion) {
+    let mut group = c.benchmark_group("mpmc");
+    group.throughput(Throughput::Elements(ELEMENTS as u64));
+    group.warm_up_time(Duration::from_secs(10));
+    group.sampling_mode(SamplingMode::Flat);
 
-            let mut consumer_handles = vec![];
-            // Spawn consumer threads
-            for _ in 0..CONSUMER_COUNT {
-                let rx: std::sync::Arc<crossbeam_channel::Receiver<Vec<i64>>> = rx.clone();
-                consumer_handles.push(thread::spawn(move || {
-                    while let Ok(batch) = rx.recv() {
-                        black_box(batch);
+    for batch_size in [1, 10, 100, 1000] {
+        group.bench_with_input(
+            BenchmarkId::from_parameter(batch_size),
+            &batch_size,
+            |b, &batch_size| {
+                b.iter(|| {
+                    let (tx, rx) = crossbeam_channel::bounded(BUFFER_SIZE);
+                    let producers: Vec<_> = (0..PRODUCER_COUNT)
+                        .map(|_| {
+                            let sender = tx.clone();
+                            thread::spawn(move || {
+                                for chunk in (0..ELEMENTS / PRODUCER_COUNT).step_by(batch_size) {
+                                    let end = (chunk + batch_size).min(ELEMENTS / PRODUCER_COUNT);
+                                    let batch = (chunk..end).collect::<Vec<_>>();
+                                    sender.send(batch).unwrap();
+                                }
+                            })
+                        })
+                        .collect();
+
+                    let consumers: Vec<_> = (0..CONSUMER_COUNT)
+                        .map(|_| {
+                            let receiver = rx.clone();
+                            thread::spawn(move || {
+                                while let Ok(batch) = receiver.recv() {
+                                    black_box(batch);
+                                }
+                            })
+                        })
+                        .collect();
+
+                    // Wait for all producers to finish
+                    for producer in producers {
+                        let _ = producer.join();
                     }
-                }));
-            }
 
-            // Spawn producer threads
-            let mut producer_handles = vec![];
-            for _ in 0..PRODUCER_COUNT {
-                let tx = tx.clone();
-                producer_handles.push(thread::spawn(move || {
-                    for chunk in (0..ITERATIONS / PRODUCER_COUNT).step_by(BATCH_SIZE) {
-                        let end = (chunk + BATCH_SIZE).min(ITERATIONS / PRODUCER_COUNT);
-                        let batch: Vec<_> = (chunk..end).map(|i| i as i64).collect();
+                    // Close the channel after all producers are done
+                    drop(tx); // This will close the sending end of the channel
 
-                        tx.send(batch).unwrap();
+                    // Wait for all consumers to finish
+                    for consumer in consumers {
+                        let _ = consumer.join();
                     }
-                }));
-            }
+                });
+            },
+        );
+    }
 
-            for handle in producer_handles {
-                handle.join().unwrap();
-            }
+    group.finish();
 
-            drop(tx);
+    let mut group = c.benchmark_group("mpmc_disruptor");
+    group.throughput(Throughput::Elements(ELEMENTS as u64));
+    group.warm_up_time(Duration::from_secs(10));
+    group.sampling_mode(SamplingMode::Flat);
 
-            for handle in consumer_handles {
-                handle.join().unwrap();
-            }
-        })
-    });
-}
+    for batch_size in [1, 10, 100, 1000] {
+        group.bench_with_input(
+            BenchmarkId::from_parameter(batch_size),
+            &batch_size,
+            |b, &batch_size| {
+                b.iter(|| {
+                    let data_provider = Arc::new(RingBuffer::new(BUFFER_SIZE));
+                    let (executor, producer) = DisruptorBuilder::new(data_provider)
+                        .with_busy_spin_waiting_strategy()
+                        .with_multi_producer_sequencer()
+                        .with_barrier(|b| {
+                            for _ in 0..CONSUMER_COUNT {
+                                b.handle_events_mut(Checker {});
+                            }
+                        })
+                        .build();
 
-fn bench_disruptor_mpmc(c: &mut Criterion) {
-    c.bench_function("disruptor_mpmc", |b| {
-        b.iter(|| {
-            let (executor, producer) = DisruptorBuilder::with_ring_buffer(BUFFER_SIZE)
-                .with_busy_spin_waiting_strategy()
-                .with_multi_producer_sequencer()
-                .with_barrier(|b| {
-                    for _ in 0..CONSUMER_COUNT {
-                        b.handle_events(TestMultiHandler);
+                    let handle = executor.spawn();
+                    let producer = Arc::new(producer);
+
+                    let mut producer_handles: Vec<_> = vec![];
+
+                    for _ in 0..PRODUCER_COUNT {
+                        let producer = producer.clone();
+                        producer_handles.push(thread::spawn(move || {
+                            for chunk in (0..ELEMENTS).step_by(batch_size) {
+                                let end = (chunk + batch_size).min(ELEMENTS);
+                                let batch = (chunk..end).collect::<Vec<_>>();
+                                producer.write(batch, |slot, seq, _| *slot = seq);
+                            }
+                        }));
                     }
-                })
-                .build();
 
-            let handle = executor.spawn();
-            let producer = std::sync::Arc::new(producer);
-
-            // Spawn producer threads
-            let mut producer_handles = vec![];
-            for _ in 0..PRODUCER_COUNT {
-                let producer = producer.clone();
-                producer_handles.push(thread::spawn(move || {
-                    for chunk in (0..ITERATIONS / PRODUCER_COUNT).step_by(BATCH_SIZE) {
-                        let end = (chunk + BATCH_SIZE).min(ITERATIONS / PRODUCER_COUNT);
-                        let batch: Vec<_> = (chunk..end).map(|i| i as i64).collect();
-
-                        producer.write(batch, |slot, _seq, &value| {
-                            *slot = value;
-                        });
+                    // Wait for all producers to finish
+                    for producer_handle in producer_handles {
+                        let _ = producer_handle.join();
                     }
-                }));
-            }
 
-            // Wait for producers to finish
-            for handle in producer_handles {
-                handle.join().unwrap();
-            }
+                    // Drain the producer to ensure all messages are processed
+                    if let Ok(producer) = Arc::try_unwrap(producer) {
+                        producer.drain();
+                    }
 
-            // Drain and cleanup
-            if let Ok(producer) = Arc::try_unwrap(producer) {
-                producer.drain();
-            }
-            handle.join();
-        })
-    });
+                    handle.join();
+                });
+            },
+        );
+    }
+    group.finish();
 }
 
 criterion_group! {
     name = benches;
-    config = Criterion::default()
-        .measurement_time(Duration::from_secs(15))
-        .sample_size(10);
-    targets = bench_channel_spsc, bench_disruptor_spsc,
-              bench_channel_spmc, bench_disruptor_spmc,
-              bench_channel_mpmc, bench_disruptor_mpmc
+    config = Criterion::default().measurement_time(Duration::from_secs(60)).sample_size(100);
+    targets = throughput_single_producer_single_consumer, throughput_multi_producer_multi_consumer
 }
 criterion_main!(benches);
