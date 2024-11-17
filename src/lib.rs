@@ -23,6 +23,8 @@ mod tests {
 
     use super::*;
 
+    const BUFFER_SIZE: usize = 1024;
+
     struct Checker;
     impl EventHandler<i64> for Checker {
         fn on_event(&self, data: &i64, sequence: Sequence, _: bool) {
@@ -54,7 +56,7 @@ mod tests {
 
     #[test]
     fn test_dsl() {
-        let data_provider = Arc::new(RingBuffer::new(4096));
+        let data_provider = Arc::new(RingBuffer::new(BUFFER_SIZE));
         let (executor, producer) = builder::DisruptorBuilder::new(data_provider)
             .with_busy_spin_waiting_strategy()
             .with_single_producer_sequencer()
@@ -77,7 +79,7 @@ mod tests {
 
     #[test]
     fn test_dsl_mut() {
-        let data_provider = Arc::new(RingBuffer::new(4096));
+        let data_provider = Arc::new(RingBuffer::new(BUFFER_SIZE));
         let (executor, producer) = builder::DisruptorBuilder::new(data_provider)
             .with_busy_spin_waiting_strategy()
             .with_single_producer_sequencer()
@@ -100,7 +102,8 @@ mod tests {
 
     #[test]
     fn test_multi_producer() {
-        let data_provider = Arc::new(RingBuffer::new(4096));
+        let num_iterations = 10000;
+        let data_provider = Arc::new(RingBuffer::new(BUFFER_SIZE));
         let (executor, producer) = builder::DisruptorBuilder::new(data_provider)
             .with_busy_spin_waiting_strategy()
             .with_multi_producer_sequencer()
@@ -117,7 +120,7 @@ mod tests {
         let producer3 = producer_arc.clone();
 
         let p1 = std::thread::spawn(move || {
-            for _ in 0..10_000 {
+            for _ in 0..num_iterations {
                 let buffer: Vec<_> = std::iter::repeat(1).take(1000).collect();
                 producer1.write(buffer, |slot, seq, _| {
                     *slot = seq;
@@ -126,7 +129,7 @@ mod tests {
         });
 
         let p2 = std::thread::spawn(move || {
-            for _ in 0..10_000 {
+            for _ in 0..num_iterations {
                 let buffer: Vec<_> = std::iter::repeat(2).take(1000).collect();
                 producer2.write(buffer, |slot, seq, _| {
                     *slot = seq;
@@ -135,7 +138,7 @@ mod tests {
         });
 
         let p3 = std::thread::spawn(move || {
-            for _ in 0..10_000 {
+            for _ in 0..num_iterations {
                 let buffer: Vec<_> = std::iter::repeat(3).take(1000).collect();
                 producer3.write(buffer, |slot, seq, _| {
                     *slot = seq;

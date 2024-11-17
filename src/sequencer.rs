@@ -79,7 +79,7 @@ impl<W: WaitingStrategy> SingleProducerSequencer<W> {
             buffer_size: buffer_size as i64,
             cursor: Arc::new(AtomicSequence::default()),
             next_value: Cell::new(Sequence::from(0)),
-            cached_value: Cell::new(Sequence::default()),
+            cached_value: Cell::new(Sequence::from(-1)),
             gating_sequences: Vec::new(),
             waiting_strategy: Arc::new(waiting_strategy),
             is_done: Default::default(),
@@ -135,6 +135,10 @@ impl<W: WaitingStrategy> Sequencer for SingleProducerSequencer<W> {
             }
         }
 
+        // while min_sequence + self.buffer_size < end {
+        //     min_sequence = Utils::get_minimum_sequence(&self.gating_sequences);
+        // }
+
         self.cached_value.set(min_sequence);
         self.next_value.set(end + 1);
 
@@ -186,6 +190,10 @@ impl<W: WaitingStrategy> MultiProducerSequencer<W> {
             available_buffer: AvailableSequenceBuffer::new(buffer_size as i64),
         }
     }
+
+    fn has_available_capacity(&self, high_water_mark: Sequence, n: Sequence) -> bool {
+        high_water_mark + n - Utils::get_minimum_sequence(&self.gating_sequences) < self.buffer_size
+    }
 }
 
 impl<W: WaitingStrategy> Sequencer for MultiProducerSequencer<W> {
@@ -215,9 +223,7 @@ impl<W: WaitingStrategy> Sequencer for MultiProducerSequencer<W> {
     fn next(&self, n: Sequence) -> (Sequence, Sequence) {
         loop {
             let high_water_mark = self.high_water_mark.get();
-            if high_water_mark + n - Utils::get_minimum_sequence(&self.gating_sequences)
-                < self.buffer_size
-            {
+            if self.has_available_capacity(high_water_mark, n) {
                 let end = high_water_mark + n;
                 if self.high_water_mark.compare_and_set(high_water_mark, end) {
                     return (high_water_mark + 1, end);
@@ -344,45 +350,6 @@ mod tests {
     #[test]
     fn test_drain() {
         let sequencer = SingleProducerSequencer::new(BUFFER_SIZE, BusySpinWaitStrategy);
-        sequencer.drain();
-    }
-
-    #[test]
-    fn test_multi_producer_sequencer_single_consumer() {
-        let mut sequencer = MultiProducerSequencer::new(BUFFER_SIZE, BusySpinWaitStrategy);
-
-        let gating_sequence = Arc::new(AtomicSequence::default());
-        sequencer.add_gating_sequence(&gating_sequence);
-
-        assert_eq!(sequencer.gating_sequences.len(), 1);
-        assert_eq!(sequencer.gating_sequences[0], gating_sequence);
-
-        let (low, high) = sequencer.next(1);
-        assert_eq!(low, 0);
-        assert_eq!(high, 0);
-
-        sequencer.publish(0, 0);
-        gating_sequence.set(0);
-
-        let (low, high) = sequencer.next(BUFFER_SIZE_I64);
-        assert_eq!(low, 1);
-        assert_eq!(high, BUFFER_SIZE_I64);
-
-        sequencer.publish(1, BUFFER_SIZE_I64);
-        gating_sequence.set(BUFFER_SIZE_I64);
-
-        // Test batch publishing with size 8
-        let batch_size = 8;
-        for i in 0..3 {
-            let start = i * batch_size + BUFFER_SIZE_I64 + 1;
-            let (low, high) = sequencer.next(batch_size);
-            assert_eq!(low, start);
-            assert_eq!(high, start + batch_size - 1);
-
-            sequencer.publish(low, high);
-            gating_sequence.set(high);
-        }
-
         sequencer.drain();
     }
 

@@ -36,7 +36,7 @@ impl AvailableSequenceBuffer {
         unsafe {
             self.available_buffer
                 .get_unchecked(index as usize)
-                .store(flag, Ordering::SeqCst);
+                .fetch_or(flag, Ordering::SeqCst);
         }
     }
 
@@ -57,7 +57,7 @@ impl AvailableSequenceBuffer {
         unsafe {
             self.available_buffer
                 .get_unchecked(index as usize)
-                .store(0, Ordering::SeqCst);
+                .fetch_and(0, Ordering::SeqCst);
         }
     }
 }
