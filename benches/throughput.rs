@@ -11,7 +11,7 @@ use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::Duration;
 
-const BUFFER_SIZE: usize = 65536;
+const BUFFER_SIZE: usize = 1024;
 const ELEMENTS: usize = 1_000_000;
 
 const PRODUCER_COUNT: usize = 3;
@@ -28,8 +28,9 @@ impl EventHandler<i64> for Checker {
 }
 
 impl EventHandlerMut<i64> for Checker {
-    fn on_event(&mut self, _event: &i64, _sequence: Sequence, _end_of_batch: bool) {}
-
+    fn on_event(&mut self, _event: &i64, _sequence: Sequence, _end_of_batch: bool) {
+        assert_eq!(*_event, _sequence);
+    }
     fn on_start(&mut self) {}
     fn on_shutdown(&mut self) {}
 }
@@ -120,8 +121,8 @@ fn throughput_multi_producer_multi_consumer(c: &mut Criterion) {
                         .map(|_| {
                             let sender = tx.clone();
                             thread::spawn(move || {
-                                for chunk in (0..ELEMENTS / PRODUCER_COUNT).step_by(batch_size) {
-                                    let end = (chunk + batch_size).min(ELEMENTS / PRODUCER_COUNT);
+                                for chunk in (0..ELEMENTS).step_by(batch_size) {
+                                    let end = (chunk + batch_size).min(ELEMENTS);
                                     let batch = (chunk..end).collect::<Vec<_>>();
                                     sender.send(batch).unwrap();
                                 }
@@ -170,40 +171,43 @@ fn throughput_multi_producer_multi_consumer(c: &mut Criterion) {
             &batch_size,
             |b, &batch_size| {
                 b.iter(|| {
+                    let num_elements = 1_000_000;
+                    // let batch_size = 1000;
+                    let consumer_count = 3;
+                    let producer_count = 3;
                     let data_provider = Arc::new(RingBuffer::new(BUFFER_SIZE));
                     let (executor, producer) = DisruptorBuilder::new(data_provider)
                         .with_busy_spin_waiting_strategy()
                         .with_multi_producer_sequencer()
                         .with_barrier(|b| {
-                            for _ in 0..CONSUMER_COUNT {
+                            for _ in 0..consumer_count {
                                 b.handle_events_mut(Checker {});
                             }
                         })
                         .build();
 
                     let handle = executor.spawn();
-                    let producer = Arc::new(producer);
 
-                    let mut producer_handles: Vec<_> = vec![];
-
-                    for _ in 0..PRODUCER_COUNT {
-                        let producer = producer.clone();
-                        producer_handles.push(thread::spawn(move || {
-                            for chunk in (0..ELEMENTS).step_by(batch_size) {
-                                let end = (chunk + batch_size).min(ELEMENTS);
-                                let batch = (chunk..end).collect::<Vec<_>>();
-                                producer.write(batch, |slot, seq, _| *slot = seq);
+                    let producer_arc = Arc::new(producer);
+                    let mut producers: Vec<_> = vec![];
+                    for _ in 0..producer_count {
+                        let producer = Arc::clone(&producer_arc);
+                        let p = std::thread::spawn(move || {
+                            for chunk in (0..num_elements).step_by(batch_size) {
+                                let end = (chunk + batch_size).min(num_elements);
+                                let buffer = (chunk..end).collect::<Vec<_>>();
+                                producer.write(buffer, |slot, seq, _| {
+                                    *slot = seq;
+                                });
                             }
-                        }));
+                        });
+                        producers.push(p);
                     }
 
-                    // Wait for all producers to finish
-                    for producer_handle in producer_handles {
-                        let _ = producer_handle.join();
+                    for p in producers {
+                        p.join().unwrap();
                     }
-
-                    // Drain the producer to ensure all messages are processed
-                    if let Ok(producer) = Arc::try_unwrap(producer) {
+                    if let Ok(producer) = Arc::try_unwrap(producer_arc) {
                         producer.drain();
                     }
 
@@ -217,7 +221,9 @@ fn throughput_multi_producer_multi_consumer(c: &mut Criterion) {
 
 criterion_group! {
     name = benches;
-    config = Criterion::default().measurement_time(Duration::from_secs(60)).sample_size(100);
-    targets = throughput_single_producer_single_consumer, throughput_multi_producer_multi_consumer
+    config = Criterion::default().measurement_time(Duration::from_secs(60)).sample_size(30);
+    targets =
+        throughput_single_producer_single_consumer,
+        throughput_multi_producer_multi_consumer
 }
 criterion_main!(benches);
