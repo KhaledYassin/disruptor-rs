@@ -171,16 +171,12 @@ fn throughput_multi_producer_multi_consumer(c: &mut Criterion) {
             &batch_size,
             |b, &batch_size| {
                 b.iter(|| {
-                    let num_elements = 1_000_000;
-                    // let batch_size = 1000;
-                    let consumer_count = 3;
-                    let producer_count = 3;
                     let data_provider = Arc::new(RingBuffer::new(BUFFER_SIZE));
                     let (executor, producer) = DisruptorBuilder::new(data_provider)
                         .with_busy_spin_waiting_strategy()
                         .with_multi_producer_sequencer()
                         .with_barrier(|b| {
-                            for _ in 0..consumer_count {
+                            for _ in 0..CONSUMER_COUNT {
                                 b.handle_events_mut(Checker {});
                             }
                         })
@@ -190,11 +186,11 @@ fn throughput_multi_producer_multi_consumer(c: &mut Criterion) {
 
                     let producer_arc = Arc::new(producer);
                     let mut producers: Vec<_> = vec![];
-                    for _ in 0..producer_count {
+                    for _ in 0..PRODUCER_COUNT {
                         let producer = Arc::clone(&producer_arc);
                         let p = std::thread::spawn(move || {
-                            for chunk in (0..num_elements).step_by(batch_size) {
-                                let end = (chunk + batch_size).min(num_elements);
+                            for chunk in (0..ELEMENTS).step_by(batch_size) {
+                                let end = (chunk + batch_size).min(ELEMENTS);
                                 let buffer = (chunk..end).collect::<Vec<_>>();
                                 producer.write(buffer, |slot, seq, _| {
                                     *slot = seq;
