@@ -107,7 +107,7 @@ pub struct Producer<D: DataProvider<T>, T, S: Sequencer> {
 impl<'a, D: DataProvider<T> + 'a, T, S: Sequencer + 'a> EventProducer<'a> for Producer<D, T, S> {
     type Item = T;
 
-    fn write<F, U, I, E>(&mut self, items: I, f: F)
+    fn write<F, U, I, E>(&self, items: I, f: F)
     where
         I: IntoIterator<Item = U, IntoIter = E>,
         E: ExactSizeIterator<Item = U>,
