@@ -110,7 +110,8 @@ fn throughput_multi_producer_multi_consumer(c: &mut Criterion) {
     group.warm_up_time(Duration::from_secs(10));
     group.sampling_mode(SamplingMode::Flat);
 
-    for batch_size in [1, 10, 100, 1000] {
+    {
+        let batch_size = 1000;
         group.bench_with_input(
             BenchmarkId::from_parameter(batch_size),
             &batch_size,
@@ -165,7 +166,8 @@ fn throughput_multi_producer_multi_consumer(c: &mut Criterion) {
     group.warm_up_time(Duration::from_secs(10));
     group.sampling_mode(SamplingMode::Flat);
 
-    for batch_size in [1, 10, 100, 1000] {
+    {
+        let batch_size = 1000;
         group.bench_with_input(
             BenchmarkId::from_parameter(batch_size),
             &batch_size,
@@ -185,7 +187,7 @@ fn throughput_multi_producer_multi_consumer(c: &mut Criterion) {
                     let handle = executor.spawn();
 
                     let producer_arc = Arc::new(producer);
-                    let mut producers: Vec<_> = vec![];
+                    let mut producers = vec![];
                     for _ in 0..PRODUCER_COUNT {
                         let producer = Arc::clone(&producer_arc);
                         let p = std::thread::spawn(move || {
@@ -219,7 +221,7 @@ criterion_group! {
     name = benches;
     config = Criterion::default().measurement_time(Duration::from_secs(60)).sample_size(30);
     targets =
-        throughput_single_producer_single_consumer,
+        // throughput_single_producer_single_consumer,
         throughput_multi_producer_multi_consumer
 }
 criterion_main!(benches);

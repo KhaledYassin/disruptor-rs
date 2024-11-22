@@ -28,11 +28,7 @@ mod tests {
     struct Checker;
     impl EventHandler<i64> for Checker {
         fn on_event(&self, data: &i64, sequence: Sequence, _: bool) {
-            if *data != sequence {
-                dbg!(*data);
-                dbg!(sequence);
-                panic!();
-            }
+            assert_eq!(*data, sequence);
         }
 
         fn on_start(&self) {}
@@ -116,7 +112,7 @@ mod tests {
         let handle = executor.spawn();
 
         let producer_arc = Arc::new(producer);
-        let mut producers: Vec<_> = vec![];
+        let mut producers = vec![];
         for _ in 0..producer_count {
             let producer = Arc::clone(&producer_arc);
             let p = std::thread::spawn(move || {
