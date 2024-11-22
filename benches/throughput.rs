@@ -221,7 +221,7 @@ criterion_group! {
     name = benches;
     config = Criterion::default().measurement_time(Duration::from_secs(60)).sample_size(30);
     targets =
-        // throughput_single_producer_single_consumer,
+        throughput_single_producer_single_consumer,
         throughput_multi_producer_multi_consumer
 }
 criterion_main!(benches);
