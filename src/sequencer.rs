@@ -52,7 +52,6 @@
 //! - Covers single-producer and multi-producer scenarios
 //! - Validates behavior under different waiting strategies
 
-use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -65,8 +64,8 @@ use crate::utils::{AvailableSequenceBuffer, Utils};
 pub struct SingleProducerSequencer<W: WaitingStrategy> {
     buffer_size: i64,
     cursor: Arc<AtomicSequence>,
-    next_value: Cell<Sequence>,
-    cached_value: Cell<Sequence>,
+    next_value: Arc<AtomicSequence>,
+    cached_value: Arc<AtomicSequence>,
     gating_sequences: Vec<Arc<AtomicSequence>>,
     waiting_strategy: Arc<W>,
     is_done: Arc<AtomicBool>,
@@ -78,8 +77,8 @@ impl<W: WaitingStrategy> SingleProducerSequencer<W> {
         Self {
             buffer_size: buffer_size as i64,
             cursor: Arc::new(AtomicSequence::default()),
-            next_value: Cell::new(Sequence::from(0)),
-            cached_value: Cell::new(Sequence::from(-1)),
+            next_value: Arc::new(Sequence::from(0).into()),
+            cached_value: Arc::new(Sequence::from(-1).into()),
             gating_sequences: Vec::new(),
             waiting_strategy: Arc::new(waiting_strategy),
             is_done: Default::default(),

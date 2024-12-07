@@ -11,7 +11,7 @@ use crate::{
         DataProvider, EventHandler, EventProcessor, EventProcessorExecutor, EventProducer,
         Runnable, Sequencer, WaitingStrategy,
     },
-    waiting::{BusySpinWaitStrategy, YieldingWaitStrategy},
+    waiting::{BusySpinWaitStrategy, SleepingWaitStrategy, YieldingWaitStrategy},
     EventHandlerMut, EventProcessorMut,
 };
 
@@ -181,6 +181,10 @@ where
     }
 
     pub fn with_yielding_waiting_strategy(self) -> WithWaitingStrategy<YieldingWaitStrategy, D, T> {
+        self.with_waiting_strategy()
+    }
+
+    pub fn with_sleeping_waiting_strategy(self) -> WithWaitingStrategy<SleepingWaitStrategy, D, T> {
         self.with_waiting_strategy()
     }
 }

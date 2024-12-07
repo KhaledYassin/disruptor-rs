@@ -267,5 +267,11 @@ pub trait EventProducer<'a> {
         E: ExactSizeIterator<Item = U>,
         F: Fn(&mut Self::Item, Sequence, &U);
 
+    fn moving_write<F, U, I, E>(&self, items: I, f: F)
+    where
+        I: IntoIterator<Item = U, IntoIter = E>,
+        E: ExactSizeIterator<Item = U>,
+        F: Fn(&mut Self::Item, Sequence, U);
+
     fn drain(self);
 }
