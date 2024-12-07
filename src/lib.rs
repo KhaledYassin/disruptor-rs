@@ -119,7 +119,7 @@ mod tests {
                 for chunk in (0..num_elements).step_by(batch_size) {
                     let end = (chunk + batch_size).min(num_elements);
                     let buffer = (chunk..end).collect::<Vec<_>>();
-                    producer.write(buffer, |slot, seq, _| {
+                    producer.moving_write(buffer, |slot, seq, _| {
                         *slot = seq;
                     });
                 }
