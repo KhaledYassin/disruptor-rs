@@ -83,7 +83,7 @@ pub trait Sequencer {
 
     // Abstract methods
     fn get_cursor(&self) -> Arc<AtomicSequence>;
-    fn next(&mut self, n: Sequence) -> (Sequence, Sequence);
+    fn next(&self, n: Sequence) -> (Sequence, Sequence);
     fn publish(&self, low: Sequence, high: Sequence);
     fn drain(self);
 }
@@ -261,11 +261,17 @@ pub trait EventProcessorExecutor<'a> {
 pub trait EventProducer<'a> {
     type Item;
 
-    fn write<F, U, I, E>(&mut self, items: I, f: F)
+    fn write<F, U, I, E>(&self, items: I, f: F)
     where
         I: IntoIterator<Item = U, IntoIter = E>,
         E: ExactSizeIterator<Item = U>,
         F: Fn(&mut Self::Item, Sequence, &U);
+
+    fn moving_write<F, U, I, E>(&self, items: I, f: F)
+    where
+        I: IntoIterator<Item = U, IntoIter = E>,
+        E: ExactSizeIterator<Item = U>,
+        F: Fn(&mut Self::Item, Sequence, U);
 
     fn drain(self);
 }

@@ -14,10 +14,17 @@ edition = "2021"
 [dependencies]
 criterion = "0.5"
 crossbeam-channel = "0.5.13"
+rand = "0.8.5"
+url = "2.5.4"
+
 
 [dev-dependencies]
 criterion = "0.5"
 cargo-llvm-cov = "0.5"
+serde = "1.0.215"
+serde_json = "1.0.133"
+tungstenite = { version = "0.19.0", features = ["native-tls"] }
+ctrlc = "3.4.5"
 
 [[bench]]
 name = "throughput"

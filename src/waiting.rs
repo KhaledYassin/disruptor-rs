@@ -259,6 +259,30 @@ mod tests {
     }
 
     #[test]
+    fn test_yielding_wait_strategy() {
+        let strategy = YieldingWaitStrategy::new();
+        let seq = Arc::new(AtomicSequence::default());
+        let dependencies = vec![seq.clone()];
+
+        // Test returns None when alerted
+        assert_eq!(strategy.wait_for(1, &dependencies, || true), None);
+
+        // Test returns sequence when available
+        seq.set(5);
+        assert_eq!(strategy.wait_for(5, &dependencies, || false), Some(5));
+
+        // Test waits for sequence
+        let seq_clone = seq.clone();
+        let handle = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(10));
+            seq_clone.set(10);
+        });
+
+        assert_eq!(strategy.wait_for(10, &dependencies, || false), Some(10));
+        handle.join().unwrap();
+    }
+
+    #[test]
     fn test_multiple_dependencies() {
         let strategy = BusySpinWaitStrategy::new();
         let seq1 = Arc::new(AtomicSequence::default());

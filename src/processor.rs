@@ -370,12 +370,12 @@ where
     }
 }
 
-impl<'a, E, T, D, B> RunnableProcessorMut<E, T, D, B>
+impl<E, T, D, B> RunnableProcessorMut<E, T, D, B>
 where
-    E: EventHandlerMut<T> + Send + 'a,
+    E: EventHandlerMut<T> + Send,
     D: DataProvider<T>,
     B: SequenceBarrier,
-    T: Send + 'a,
+    T: Send,
 {
     fn process_events(&mut self) {
         let f = &mut self.processor.handler;

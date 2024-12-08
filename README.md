@@ -19,7 +19,7 @@ This project is a fork of [disrustor](https://github.com/sklose/disrustor) by Se
 
 ## Important Differences from the original implementation
 
-- The most important difference is that this implementation is that the `Sequencer` uses `WaitingStrategy` to get coordinate between the sequences instead of the default implied busy-spinning. This makes the disruptor more consistent and potentially more performant and efficient in its CPU usage.
+The most important difference is that this implementation is that the `Sequencer` uses `WaitingStrategy` to get coordinate between the sequences instead of the default implied busy-spinning. This makes the disruptor more consistent and potentially more performant and efficient in its CPU usage.
 
 ## What is the Disruptor?
 
@@ -110,6 +110,10 @@ handle.join();
 - **Waiting Strategy**: Choose based on your latency/CPU trade-offs
 - **Event Handlers**: Keep processing logic lightweight
 - **Batch Processing**: Use batch writes when possible
+
+## A Note about the `MultiProducerSequencer`
+
+The `MultiProducerSequencer` feature is not very stable yet. You may feel free to use it experimentally. It passes all the sequencing tests but it's not optimized enough to beat the impressive performance of the [crossbeam_channel](https://github.com/crossbeam-rs/crossbeam/tree/master/crossbeam-channel). Any contributions in this regard are more than welcome.
 
 ## Contributing
 
