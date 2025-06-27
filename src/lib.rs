@@ -65,7 +65,7 @@ mod tests {
 
         let handle = executor.spawn();
         for _ in 0..10_000 {
-            let buffer: Vec<_> = std::iter::repeat(1).take(1000).collect();
+            let buffer: Vec<_> = std::iter::repeat_n(1, 1000).collect();
             producer.write(buffer, |slot, seq, _| {
                 *slot = seq;
             });
@@ -88,7 +88,7 @@ mod tests {
 
         let handle = executor.spawn();
         for _ in 0..10_000 {
-            let buffer: Vec<_> = std::iter::repeat(1).take(1000).collect();
+            let buffer: Vec<_> = std::iter::repeat_n(1, 1000).collect();
             producer.write(buffer, |slot, seq, _| {
                 *slot = seq;
             });
