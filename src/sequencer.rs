@@ -115,9 +115,9 @@ impl<W: WaitingStrategy> Sequencer for SingleProducerSequencer<W> {
             let mut min_sequence = self.cached_value;
 
             while min_sequence + self.buffer_size < end {
-                if let Some(new_min_sequence) = self
-                    .waiting_strategy
-                    .wait_for(min_sequence, &self.gating_sequences, || false)
+                if let Some(new_min_sequence) =
+                    self.waiting_strategy
+                        .wait_for(min_sequence, &self.gating_sequences, || false)
                 {
                     min_sequence = new_min_sequence;
                 } else {
