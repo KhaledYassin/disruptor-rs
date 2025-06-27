@@ -108,22 +108,26 @@ impl<W: WaitingStrategy> Sequencer for SingleProducerSequencer<W> {
     }
 
     fn next(&mut self, n: Sequence) -> (Sequence, Sequence) {
-        let mut min_sequence = self.cached_value;
         let next = self.next_value;
         let (start, end) = (next, next + (n - 1));
 
-        while min_sequence + self.buffer_size < end {
-            if let Some(new_min_sequence) =
-                self.waiting_strategy
+        if !self.gating_sequences.is_empty() {
+            let mut min_sequence = self.cached_value;
+
+            while min_sequence + self.buffer_size < end {
+                if let Some(new_min_sequence) = self
+                    .waiting_strategy
                     .wait_for(min_sequence, &self.gating_sequences, || false)
-            {
-                min_sequence = new_min_sequence;
-            } else {
-                break;
+                {
+                    min_sequence = new_min_sequence;
+                } else {
+                    break;
+                }
             }
+
+            self.cached_value = min_sequence;
         }
 
-        self.cached_value = min_sequence;
         self.next_value = end + 1;
 
         (start, end)
@@ -203,5 +207,15 @@ mod tests {
         assert!(sequencer.remove_gating_sequence(&gating_sequence));
         assert_eq!(sequencer.gating_sequences.len(), 0);
         assert!(!sequencer.remove_gating_sequence(&gating_sequence));
+    }
+
+    #[test]
+    fn test_next_without_gating_sequences_large_request() {
+        let mut sequencer = SingleProducerSequencer::new(BUFFER_SIZE, BusySpinWaitStrategy);
+        // No gating sequences added
+        let n = BUFFER_SIZE_I64 * 2;
+        let (start, end) = sequencer.next(n);
+        assert_eq!(start, 0);
+        assert_eq!(end, n - 1);
     }
 }
