@@ -31,62 +31,6 @@ mod tests {
     use crate::sequence::AtomicSequence;
 
     #[test]
-    fn test_get_minimum_sequence_empty() {
-        let sequences: Vec<Arc<AtomicSequence>> = Vec::new();
-        assert_eq!(Utils::get_minimum_sequence(&sequences), i64::MAX);
-    }
-}
-
-pub struct AvailableSequenceBuffer {
-    available_buffer: Vec<AtomicI64>,
-    index_mask: i64,
-}
-
-impl AvailableSequenceBuffer {
-    pub fn new(buffer_size: i64) -> Self {
-        Self {
-            available_buffer: (0..buffer_size).map(|_| AtomicI64::new(0)).collect(),
-            index_mask: buffer_size - 1,
-        }
-    }
-
-    pub fn set(&self, sequence: i64) {
-        let index = sequence & self.index_mask;
-        let flag = 1 << (sequence & 0x1f);
-        unsafe {
-            self.available_buffer
-                .get_unchecked(index as usize)
-                .fetch_or(flag, Ordering::SeqCst);
-        }
-    }
-
-    pub fn is_set(&self, sequence: i64) -> bool {
-        let index = sequence & self.index_mask;
-        let flag = 1 << (sequence & 0x1f);
-        unsafe {
-            self.available_buffer
-                .get_unchecked(index as usize)
-                .load(Ordering::SeqCst)
-                & flag
-                != 0
-        }
-    }
-
-    pub fn unset(&self, sequence: i64) {
-        let index = sequence & self.index_mask;
-        unsafe {
-            self.available_buffer
-                .get_unchecked(index as usize)
-                .fetch_and(0, Ordering::SeqCst);
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
     fn test_get_minimum_sequence() {
         let sequences = vec![
             Arc::new(AtomicSequence::new(1)),
@@ -97,7 +41,7 @@ mod tests {
 
         // Test empty sequence
         let empty: Vec<Arc<AtomicSequence>> = vec![];
-        assert_eq!(Utils::get_minimum_sequence(&empty), 0); // default value
+        assert_eq!(Utils::get_minimum_sequence(&empty), i64::MAX);
     }
 
     #[test]
@@ -111,7 +55,7 @@ mod tests {
 
         // Test empty sequence
         let empty: Vec<Arc<AtomicSequence>> = vec![];
-        assert_eq!(Utils::get_maximum_sequence(&empty), 0); // default value
+        assert_eq!(Utils::get_maximum_sequence(&empty), i64::MIN);
     }
 
     #[test]
@@ -134,6 +78,52 @@ mod tests {
         // Test that even sequences are set and odd sequences are not.
         for i in 0..buffer_size {
             assert_eq!(buffer.is_set(i), i % 2 == 0);
+        }
+    }
+}
+
+pub struct AvailableSequenceBuffer {
+    available_buffer: Vec<AtomicI64>,
+    index_mask: i64,
+}
+
+impl AvailableSequenceBuffer {
+    pub fn new(buffer_size: i64) -> Self {
+        Self {
+            available_buffer: (0..buffer_size).map(|_| AtomicI64::new(0)).collect(),
+            index_mask: buffer_size - 1,
+        }
+    }
+
+    pub fn set(&self, sequence: i64) {
+        let index = sequence & self.index_mask;
+        let flag = 1 << (sequence & 0x3f); // Use 6 bits (0-63) for full i64 range
+        unsafe {
+            self.available_buffer
+                .get_unchecked(index as usize)
+                .fetch_or(flag, Ordering::SeqCst);
+        }
+    }
+
+    pub fn is_set(&self, sequence: i64) -> bool {
+        let index = sequence & self.index_mask;
+        let flag = 1 << (sequence & 0x3f); // Use 6 bits (0-63) for full i64 range
+        unsafe {
+            self.available_buffer
+                .get_unchecked(index as usize)
+                .load(Ordering::SeqCst)
+                & flag
+                != 0
+        }
+    }
+
+    pub fn unset(&self, sequence: i64) {
+        let index = sequence & self.index_mask;
+        let flag = 1 << (sequence & 0x3f); // Use 6 bits (0-63) for full i64 range
+        unsafe {
+            self.available_buffer
+                .get_unchecked(index as usize)
+                .fetch_and(!flag, Ordering::SeqCst);
         }
     }
 }

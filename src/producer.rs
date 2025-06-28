@@ -114,7 +114,12 @@ impl<'a, D: DataProvider<T> + 'a, T, S: Sequencer + 'a> EventProducer<'a> for Pr
         F: Fn(&mut Self::Item, Sequence, &U),
     {
         let iter = items.into_iter();
-        let (start, end) = self.sequencer.next(iter.len() as Sequence);
+        let n = iter.len();
+        if n == 0 {
+            return;
+        }
+
+        let (start, end) = self.sequencer.next(n as Sequence);
         for (i, item) in iter.enumerate() {
             let sequence = start + i as Sequence;
             // SAFETY: The sequence is guaranteed to be within the bounds of the ring buffer.
@@ -131,7 +136,12 @@ impl<'a, D: DataProvider<T> + 'a, T, S: Sequencer + 'a> EventProducer<'a> for Pr
         F: Fn(&mut Self::Item, Sequence, U),
     {
         let iter = items.into_iter();
-        let (start, end) = self.sequencer.next(iter.len() as Sequence);
+        let n = iter.len();
+        if n == 0 {
+            return;
+        }
+
+        let (start, end) = self.sequencer.next(n as Sequence);
         for (i, item) in iter.enumerate() {
             let sequence = start + i as Sequence;
             // SAFETY: The sequence is guaranteed to be within the bounds of the ring buffer.
@@ -153,5 +163,35 @@ impl<D: DataProvider<T>, T, S: Sequencer> Producer<D, T, S> {
             sequencer,
             _marker: Default::default(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        ringbuffer::RingBuffer, sequencer::SingleProducerSequencer, waiting::BusySpinWaitStrategy,
+    };
+
+    #[test]
+    fn write_empty_iterator_does_nothing() {
+        let rb = Arc::new(RingBuffer::<i64>::new(16));
+        let sequencer = SingleProducerSequencer::new(16, BusySpinWaitStrategy);
+        let cursor = sequencer.get_cursor();
+        let producer = Producer::new(rb, sequencer);
+
+        producer.write(Vec::<i64>::new(), |_, _, _| unreachable!());
+        assert_eq!(cursor.get(), -1);
+    }
+
+    #[test]
+    fn moving_write_empty_iterator_does_nothing() {
+        let rb = Arc::new(RingBuffer::<i64>::new(16));
+        let sequencer = SingleProducerSequencer::new(16, BusySpinWaitStrategy);
+        let cursor = sequencer.get_cursor();
+        let producer = Producer::new(rb, sequencer);
+
+        producer.moving_write(Vec::<i64>::new(), |_, _, _| unreachable!());
+        assert_eq!(cursor.get(), -1);
     }
 }

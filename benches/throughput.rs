@@ -38,7 +38,8 @@ impl EventHandlerMut<i64> for Checker {
 fn throughput_single_producer_single_consumer(c: &mut Criterion) {
     let mut group = c.benchmark_group("spsc");
     group.throughput(Throughput::Elements(ELEMENTS as u64));
-    group.warm_up_time(Duration::from_secs(10));
+    group.warm_up_time(Duration::from_secs(5));
+    group.measurement_time(Duration::from_secs(5));
     group.sampling_mode(SamplingMode::Flat);
 
     for batch_size in [1, 10, 100, 1000] {
@@ -72,7 +73,8 @@ fn throughput_single_producer_single_consumer(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("spsc_disruptor");
     group.throughput(Throughput::Elements(ELEMENTS as u64));
-    group.warm_up_time(Duration::from_secs(10));
+    group.warm_up_time(Duration::from_secs(5));
+    group.measurement_time(Duration::from_secs(5));
     group.sampling_mode(SamplingMode::Flat);
     for batch_size in [1, 10, 100, 1000] {
         group.bench_with_input(
@@ -110,20 +112,27 @@ fn throughput_multi_producer_multi_consumer(c: &mut Criterion) {
     group.warm_up_time(Duration::from_secs(10));
     group.sampling_mode(SamplingMode::Flat);
 
-    {
-        let batch_size = 1000;
+    for batch_size in [1, 10, 100, 1000] {
         group.bench_with_input(
             BenchmarkId::from_parameter(batch_size),
             &batch_size,
             |b, &batch_size| {
                 b.iter(|| {
                     let (tx, rx) = crossbeam_channel::bounded(BUFFER_SIZE);
+                    let elements_per_producer = ELEMENTS / PRODUCER_COUNT;
                     let producers: Vec<_> = (0..PRODUCER_COUNT)
-                        .map(|_| {
+                        .map(|producer_id| {
                             let sender = tx.clone();
+                            let start_element = producer_id * elements_per_producer;
+                            let end_element = if producer_id == PRODUCER_COUNT - 1 {
+                                ELEMENTS // Last producer handles any remainder
+                            } else {
+                                (producer_id + 1) * elements_per_producer
+                            };
+
                             thread::spawn(move || {
-                                for chunk in (0..ELEMENTS).step_by(batch_size) {
-                                    let end = (chunk + batch_size).min(ELEMENTS);
+                                for chunk in (start_element..end_element).step_by(batch_size) {
+                                    let end = (chunk + batch_size).min(end_element);
                                     let batch = (chunk..end).collect::<Vec<_>>();
                                     sender.send(batch).unwrap();
                                 }
@@ -163,11 +172,11 @@ fn throughput_multi_producer_multi_consumer(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("mpmc_disruptor");
     group.throughput(Throughput::Elements(ELEMENTS as u64));
-    group.warm_up_time(Duration::from_secs(10));
+    group.warm_up_time(Duration::from_secs(5));
+    group.measurement_time(Duration::from_secs(5));
     group.sampling_mode(SamplingMode::Flat);
 
-    {
-        let batch_size = 1000;
+    for batch_size in [1, 10, 100, 1000] {
         group.bench_with_input(
             BenchmarkId::from_parameter(batch_size),
             &batch_size,
@@ -188,11 +197,19 @@ fn throughput_multi_producer_multi_consumer(c: &mut Criterion) {
 
                     let producer_arc = Arc::new(producer);
                     let mut producers = vec![];
-                    for _ in 0..PRODUCER_COUNT {
+                    let elements_per_producer = ELEMENTS / PRODUCER_COUNT;
+                    for producer_id in 0..PRODUCER_COUNT {
                         let producer = Arc::clone(&producer_arc);
+                        let start_element = producer_id * elements_per_producer;
+                        let end_element = if producer_id == PRODUCER_COUNT - 1 {
+                            ELEMENTS // Last producer handles any remainder
+                        } else {
+                            (producer_id + 1) * elements_per_producer
+                        };
+
                         let p = std::thread::spawn(move || {
-                            for chunk in (0..ELEMENTS).step_by(batch_size) {
-                                let end = (chunk + batch_size).min(ELEMENTS);
+                            for chunk in (start_element..end_element).step_by(batch_size) {
+                                let end = (chunk + batch_size).min(end_element);
                                 let buffer = (chunk..end).collect::<Vec<_>>();
                                 producer.write(buffer, |slot, seq, _| {
                                     *slot = seq;
@@ -219,9 +236,9 @@ fn throughput_multi_producer_multi_consumer(c: &mut Criterion) {
 
 criterion_group! {
     name = benches;
-    config = Criterion::default().measurement_time(Duration::from_secs(60)).sample_size(30);
+    config = Criterion::default().measurement_time(Duration::from_secs(10)).sample_size(10);
     targets =
-        throughput_single_producer_single_consumer,
+            throughput_single_producer_single_consumer,
         throughput_multi_producer_multi_consumer
 }
 criterion_main!(benches);

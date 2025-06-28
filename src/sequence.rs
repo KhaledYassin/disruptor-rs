@@ -99,6 +99,12 @@ impl AtomicSequence {
     pub fn increment_and_get(&self) -> Sequence {
         self.value.fetch_add(1, Ordering::SeqCst) + 1
     }
+
+    /// Atomically add `delta` to the sequence and return the previous value.
+    #[inline]
+    pub fn get_and_add(&self, delta: Sequence) -> Sequence {
+        self.value.fetch_add(delta, Ordering::SeqCst)
+    }
 }
 
 impl Default for AtomicSequence {
