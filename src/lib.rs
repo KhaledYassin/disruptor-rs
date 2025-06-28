@@ -64,8 +64,12 @@ mod tests {
             .build();
 
         let handle = executor.spawn();
-        for _ in 0..10_000 {
-            let buffer: Vec<_> = std::iter::repeat_n(1, 1000).collect();
+        // Miri is much slower; use smaller batches under `cfg(miri)`
+        let outer = if cfg!(miri) { 100 } else { 10_000 };
+        let inner = if cfg!(miri) { 10 } else { 1_000 };
+
+        for _ in 0..outer {
+            let buffer: Vec<_> = std::iter::repeat_n(1, inner).collect();
             producer.write(buffer, |slot, seq, _| {
                 *slot = seq;
             });
@@ -87,8 +91,12 @@ mod tests {
             .build();
 
         let handle = executor.spawn();
-        for _ in 0..10_000 {
-            let buffer: Vec<_> = std::iter::repeat_n(1, 1000).collect();
+        // Miri is much slower; use smaller batches under `cfg(miri)`
+        let outer = if cfg!(miri) { 100 } else { 10_000 };
+        let inner = if cfg!(miri) { 10 } else { 1_000 };
+
+        for _ in 0..outer {
+            let buffer: Vec<_> = std::iter::repeat_n(1, inner).collect();
             producer.write(buffer, |slot, seq, _| {
                 *slot = seq;
             });
