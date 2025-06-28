@@ -140,10 +140,20 @@ impl<W: WaitingStrategy> Sequencer for SingleProducerSequencer<W> {
 
     fn drain(self) {
         let current = self.next_value - 1;
+
+        // Wake up any processors so they can finish processing all published events
+        self.waiting_strategy.signal_all_when_blocking();
+
+        // Wait until every gating sequence (i.e. every consumer) has caught up
         while Utils::get_minimum_sequence(&self.gating_sequences) < current {
+            // Give the consumer threads a chance to run and make progress
             self.waiting_strategy.signal_all_when_blocking();
+            std::thread::yield_now();
         }
+
+        // All events are processed – now signal shutdown so processors can exit cleanly
         self.is_done.store(true, Ordering::SeqCst);
+        // Final wake-up to ensure blocked threads observe the shutdown signal
         self.waiting_strategy.signal_all_when_blocking();
     }
 }
