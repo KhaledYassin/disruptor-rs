@@ -11,7 +11,7 @@ use crate::{sequence::Sequence, traits::DataProvider};
 ///   The `Default` trait is used to initialize the buffer with default values. The `Send` trait is
 ///   used to allow the data to be sent between threads.  
 /// # Safety
-/// We require intrior mutability to allow for multiple readers and writers to access the buffer concurrently.
+/// We require interior mutability to allow for multiple readers and writers to access the buffer concurrently.
 pub struct RingBuffer<T> {
     capacity: usize,
     _mask: usize,
@@ -126,12 +126,22 @@ mod tests {
         let buffer = Arc::new(RingBuffer::<i64>::new(ITERATIONS as usize));
         let mut handles = vec![];
 
-        for _ in 0..THREADS {
+        // Each thread works on a different partition of the buffer to avoid data races
+        let chunk_size = ITERATIONS / THREADS as i64;
+
+        for thread_id in 0..THREADS {
             let buffer = buffer.clone();
             let handle = thread::spawn(move || {
-                for i in 0..ITERATIONS {
+                let start = thread_id as i64 * chunk_size;
+                let end = if thread_id == THREADS - 1 {
+                    ITERATIONS // Last thread handles any remainder
+                } else {
+                    start + chunk_size
+                };
+
+                for i in start..end {
                     unsafe {
-                        *buffer.get_mut(i) += i;
+                        *buffer.get_mut(i) = i * 2; // Each thread sets its partition
                     }
                 }
             });
@@ -143,9 +153,10 @@ mod tests {
             handle.join().unwrap();
         }
 
+        // Verify each position was set correctly
         for i in 0..ITERATIONS {
             unsafe {
-                assert_eq!(*buffer.get(i), i * THREADS as i64);
+                assert_eq!(*buffer.get(i), i * 2);
             }
         }
     }

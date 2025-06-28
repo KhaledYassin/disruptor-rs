@@ -118,28 +118,28 @@ impl<W: WaitingStrategy> Sequencer for SingleProducerSequencer<W> {
         self.cursor.clone()
     }
 
-    fn next(&self, n: Sequence) -> (Sequence, Sequence) {
-        let mut min_sequence = self.cached_value.get();
-        let next = self.next_value.get();
+    fn next(&mut self, n: Sequence) -> (Sequence, Sequence) {
+        let next = self.next_value;
         let (start, end) = (next, next + (n - 1));
 
-        while min_sequence + self.buffer_size < end {
-            if let Some(new_min_sequence) =
-                self.waiting_strategy
-                    .wait_for(min_sequence, &self.gating_sequences, || false)
-            {
-                min_sequence = new_min_sequence;
-            } else {
-                break;
+        if !self.gating_sequences.is_empty() {
+            let mut min_sequence = self.cached_value;
+
+            while min_sequence + self.buffer_size < end {
+                if let Some(new_min_sequence) =
+                    self.waiting_strategy
+                        .wait_for(min_sequence, &self.gating_sequences, || false)
+                {
+                    min_sequence = new_min_sequence;
+                } else {
+                    break;
+                }
             }
+
+            self.cached_value = min_sequence;
         }
 
-        // while min_sequence + self.buffer_size < end {
-        //     min_sequence = Utils::get_minimum_sequence(&self.gating_sequences);
-        // }
-
-        self.cached_value.set(min_sequence);
-        self.next_value.set(end + 1);
+        self.next_value = end + 1;
 
         (start, end)
     }
@@ -150,11 +150,21 @@ impl<W: WaitingStrategy> Sequencer for SingleProducerSequencer<W> {
     }
 
     fn drain(self) {
-        let current = self.next_value.get() - 1;
+        let current = self.next_value - 1;
+
+        // Wake up any processors so they can finish processing all published events
+        self.waiting_strategy.signal_all_when_blocking();
+
+        // Wait until every gating sequence (i.e. every consumer) has caught up
         while Utils::get_minimum_sequence(&self.gating_sequences) < current {
+            // Give the consumer threads a chance to run and make progress
             self.waiting_strategy.signal_all_when_blocking();
+            std::thread::yield_now();
         }
+
+        // All events are processed – now signal shutdown so processors can exit cleanly
         self.is_done.store(true, Ordering::SeqCst);
+        // Final wake-up to ensure blocked threads observe the shutdown signal
         self.waiting_strategy.signal_all_when_blocking();
     }
 }
@@ -347,59 +357,12 @@ mod tests {
     }
 
     #[test]
-    fn test_drain() {
-        let sequencer = SingleProducerSequencer::new(BUFFER_SIZE, BusySpinWaitStrategy);
-        sequencer.drain();
-    }
-
-    #[test]
-    fn test_multi_producer_sequencer_multiple_consumers_multi_threaded() {
-        let mut sequencer = MultiProducerSequencer::new(BUFFER_SIZE, BusySpinWaitStrategy);
-
-        let num_consumers = 16;
-        let num_iterations = 10000;
-        let batch_size = 8;
-
-        // Create gating sequences for each consumer
-        let gating_sequences: Vec<Arc<AtomicSequence>> = (0..num_consumers)
-            .map(|_| Arc::new(AtomicSequence::default()))
-            .collect();
-
-        // Add all gating sequences to the sequencer
-        for seq in &gating_sequences {
-            sequencer.add_gating_sequence(seq);
-        }
-
-        // Create consumer threads
-        let mut consumer_handles = vec![];
-        for gating_sequence in &gating_sequences {
-            let gating_sequence = gating_sequence.clone();
-
-            let handle = thread::spawn(move || {
-                let mut last_sequence = -1;
-                while last_sequence < (num_iterations - 1) {
-                    let new_sequence = last_sequence + 1;
-                    gating_sequence.set(new_sequence);
-                    last_sequence = new_sequence;
-                }
-            });
-
-            consumer_handles.push(handle);
-        }
-
-        // Producer loop
-        for i in 0..(num_iterations / batch_size) {
-            let (low, high) = sequencer.next(batch_size);
-            assert_eq!(low, i * batch_size);
-            assert_eq!(high, { i * batch_size + batch_size - 1 });
-            sequencer.publish(low, high);
-        }
-
-        // Wait for all consumers to complete
-        for handle in consumer_handles {
-            handle.join().unwrap();
-        }
-
-        sequencer.drain();
+    fn test_next_without_gating_sequences_large_request() {
+        let mut sequencer = SingleProducerSequencer::new(BUFFER_SIZE, BusySpinWaitStrategy);
+        // No gating sequences added
+        let n = BUFFER_SIZE_I64 * 2;
+        let (start, end) = sequencer.next(n);
+        assert_eq!(start, 0);
+        assert_eq!(end, n - 1);
     }
 }

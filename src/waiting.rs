@@ -114,14 +114,15 @@ impl WaitingStrategy for BusySpinWaitStrategy {
         check_alert: F,
     ) -> Option<i64> {
         loop {
+            // Check alert condition first to handle shutdown quickly
+            if check_alert() {
+                return None;
+            }
+
             let minimum_sequence = Utils::get_minimum_sequence(dependencies);
 
             if minimum_sequence >= sequence {
                 return Some(minimum_sequence);
-            }
-
-            if check_alert() {
-                return None;
             }
         }
     }
@@ -144,14 +145,15 @@ impl WaitingStrategy for YieldingWaitStrategy {
     ) -> Option<i64> {
         let mut counter = 100;
         loop {
+            // Check alert condition first to handle shutdown quickly
+            if check_alert() {
+                return None;
+            }
+
             let minimum_sequence = Utils::get_minimum_sequence(dependencies);
 
             if minimum_sequence >= sequence {
                 return Some(minimum_sequence);
-            }
-
-            if check_alert() {
-                return None;
             }
 
             counter -= 1;
@@ -182,14 +184,15 @@ impl WaitingStrategy for SleepingWaitStrategy {
     ) -> Option<i64> {
         let mut counter = 200;
         loop {
+            // Check alert condition first to handle shutdown quickly
+            if check_alert() {
+                return None;
+            }
+
             let minimum_sequence = Utils::get_minimum_sequence(dependencies);
 
             if minimum_sequence >= sequence {
                 return Some(minimum_sequence);
-            }
-
-            if check_alert() {
-                return None;
             }
 
             counter -= 1;
