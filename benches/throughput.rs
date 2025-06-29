@@ -12,7 +12,7 @@ use std::thread;
 use std::time::Duration;
 
 const BUFFER_SIZE: usize = 1024;
-const ELEMENTS: usize = 1_000_000;
+const ELEMENTS: usize = BUFFER_SIZE;
 
 const PRODUCER_COUNT: usize = 3;
 const CONSUMER_COUNT: usize = 3;
@@ -42,7 +42,7 @@ fn throughput_single_producer_single_consumer(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(5));
     group.sampling_mode(SamplingMode::Flat);
 
-    for batch_size in [1, 10, 100, 1000] {
+    for batch_size in [1, 10, 100] {
         group.bench_with_input(
             BenchmarkId::from_parameter(batch_size),
             &batch_size,
@@ -76,7 +76,7 @@ fn throughput_single_producer_single_consumer(c: &mut Criterion) {
     group.warm_up_time(Duration::from_secs(5));
     group.measurement_time(Duration::from_secs(5));
     group.sampling_mode(SamplingMode::Flat);
-    for batch_size in [1, 10, 100, 1000] {
+    for batch_size in [1, 10, 100] {
         group.bench_with_input(
             BenchmarkId::from_parameter(batch_size),
             &batch_size,
@@ -112,7 +112,7 @@ fn throughput_multi_producer_multi_consumer(c: &mut Criterion) {
     group.warm_up_time(Duration::from_secs(10));
     group.sampling_mode(SamplingMode::Flat);
 
-    for batch_size in [1, 10, 100, 1000] {
+    for batch_size in [1, 10, 100] {
         group.bench_with_input(
             BenchmarkId::from_parameter(batch_size),
             &batch_size,
@@ -176,7 +176,7 @@ fn throughput_multi_producer_multi_consumer(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(5));
     group.sampling_mode(SamplingMode::Flat);
 
-    for batch_size in [1, 10, 100, 1000] {
+    for batch_size in [1, 10, 100] {
         group.bench_with_input(
             BenchmarkId::from_parameter(batch_size),
             &batch_size,
