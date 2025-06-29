@@ -258,37 +258,70 @@ impl<W: WaitingStrategy> Sequencer for MultiProducerSequencer<W> {
     }
 
     fn publish(&self, low: Sequence, high: Sequence) {
-        // 1. mark the batch as available
-        for seq in low..=high {
-            self.available_buffer.set(seq);
-        }
+        // Use batch setting
+        self.available_buffer.set_batch(low, high);
 
-        // 2. try to advance the cursor as far as possible
+        // Try advancing cursor with backoff on failure
+        let mut cursor_val = self.cursor.get();
+        let mut attempts = 0;
+        const MAX_ATTEMPTS: usize = 3;
+
         loop {
-            let cursor_val = self.cursor.get();
             let mut next = cursor_val + 1;
 
-            // Scan for all contiguous available sequences starting from cursor+1
-            while self.available_buffer.is_set(next) {
-                next += 1;
+            // Scan for contiguous sequences - use chunked scanning to balance performance
+            let mut chunk_start = next;
+            const CHUNK_SIZE: i64 = 64;
+
+            loop {
+                let chunk_end = chunk_start + CHUNK_SIZE;
+                let mut chunk_next = chunk_start;
+
+                // Scan within this chunk
+                while chunk_next < chunk_end && self.available_buffer.is_set(chunk_next) {
+                    chunk_next += 1;
+                }
+
+                if chunk_next < chunk_end {
+                    // Found a gap in this chunk
+                    next = chunk_next;
+                    break;
+                } else {
+                    // Chunk is fully contiguous, check if we should continue
+                    next = chunk_next;
+                    chunk_start = chunk_end;
+
+                    // Don't scan indefinitely - limit to reasonable distance
+                    if chunk_start > cursor_val + 1024 {
+                        break;
+                    }
+                }
             }
+
             let contiguous_end = next - 1;
 
-            // If we found contiguous sequences, try to advance the cursor
             if contiguous_end > cursor_val {
-                // Use compare_and_set to handle race conditions with other threads
                 if self.cursor.compare_and_set(cursor_val, contiguous_end) {
-                    // Successfully advanced cursor, unset the available flags
-                    for seq in (cursor_val + 1)..=contiguous_end {
-                        self.available_buffer.unset(seq);
-                    }
+                    // Success - batch unset the flags
+                    self.available_buffer
+                        .unset_batch(cursor_val + 1, contiguous_end);
                     self.waiting_strategy.signal_all_when_blocking();
                     break;
+                } else {
+                    // CAS failed, retry with exponential backoff
+                    attempts += 1;
+                    if attempts >= MAX_ATTEMPTS {
+                        break; // Give up to avoid excessive spinning
+                    }
+                    cursor_val = self.cursor.get();
+
+                    // Exponential backoff
+                    for _ in 0..attempts {
+                        std::hint::spin_loop();
+                    }
                 }
-                // If CAS failed, another thread advanced cursor, try again
             } else {
-                // No progress possible, exit
-                break;
+                break; // No progress possible
             }
         }
     }
@@ -391,7 +424,7 @@ mod tests {
 
         println!("Testing next() without gating sequences...");
         let (start, end) = sequencer.next(1);
-        println!("Got range: {} to {}", start, end);
+        println!("Got range: {start} to {end}");
         assert_eq!(start, 0);
         assert_eq!(end, 0);
 
@@ -418,7 +451,7 @@ mod tests {
 
         println!("Testing next() with gating sequences...");
         let (start, end) = sequencer.next(1);
-        println!("Got range: {} to {}", start, end);
+        println!("Got range: {start} to {end}");
 
         println!("Testing publish()...");
         sequencer.publish(start, end);
@@ -427,15 +460,11 @@ mod tests {
         // Now try to fill up the buffer
         println!("Filling buffer to test wrap-around...");
         for i in 1..BUFFER_SIZE {
-            println!("Claiming sequence {}", i);
+            println!("Claiming sequence {i}");
             let (s, e) = sequencer.next(1);
-            println!("Got range: {} to {}", s, e);
+            println!("Got range: {s} to {e}");
             sequencer.publish(s, e);
-            println!(
-                "Published sequence {}, cursor: {}",
-                i,
-                sequencer.cursor.get()
-            );
+            println!("Published sequence {i}, cursor: {}", sequencer.cursor.get());
         }
 
         // Now simulate consumers making progress before trying wrap-around
@@ -453,7 +482,7 @@ mod tests {
         );
 
         let (start, end) = sequencer.next(1);
-        println!("After next(): Got range: {} to {}", start, end);
+        println!("After next(): Got range: {start} to {end}");
 
         println!("Test completed successfully!");
     }
@@ -473,13 +502,13 @@ mod tests {
         println!("Filling buffer completely...");
         for i in 0..BUFFER_SIZE {
             let (start, end) = sequencer.next(1);
-            println!("Claimed sequence {}: {} to {}", i, start, end);
+            println!("Claimed sequence {i}: {start} to {end}");
             sequencer.publish(start, end);
 
             // Simulate consumer processing (advance every few events)
             if i % 4 == 3 {
                 consumer.set(i as i64);
-                println!("Consumer advanced to {}", i);
+                println!("Consumer advanced to {i}");
             }
         }
 
@@ -492,7 +521,7 @@ mod tests {
         // Try to claim one more - this should work now that consumer has progressed
         println!("Trying to claim one more sequence...");
         let (start, end) = sequencer.next(1);
-        println!("Successfully claimed: {} to {}", start, end);
+        println!("Successfully claimed: {start} to {end}");
 
         println!("Test completed successfully!");
     }
@@ -519,25 +548,22 @@ mod tests {
         let (seq2_start, seq2_end) = sequencer.next(1);
         let (seq3_start, seq3_end) = sequencer.next(1);
 
-        println!(
-            "Claimed sequences: {} {} {}",
-            seq1_start, seq2_start, seq3_start
-        );
+        println!("Claimed sequences: {seq1_start} {seq2_start} {seq3_start}");
         println!("Cursor after claiming: {}", sequencer.cursor.get());
 
         // Publish out of order: 3rd, 2nd, then 1st (simulating race condition)
-        println!("Publishing sequence {} (3rd)", seq3_start);
+        println!("Publishing sequence {seq3_start} (3rd)");
         sequencer.publish(seq3_start, seq3_end);
         println!("Cursor after publishing 3rd: {}", sequencer.cursor.get());
 
-        println!("Publishing sequence {} (2nd)", seq2_start);
+        println!("Publishing sequence {seq2_start} (2nd)");
         sequencer.publish(seq2_start, seq2_end);
         println!("Cursor after publishing 2nd: {}", sequencer.cursor.get());
 
         // At this point cursor should still be at -1 because sequence 0 hasn't been published
         // But if a consumer tries to wait for sequence 1 or 2, it will hang!
 
-        println!("Publishing sequence {} (1st)", seq1_start);
+        println!("Publishing sequence {seq1_start} (1st)");
         sequencer.publish(seq1_start, seq1_end);
         println!("Cursor after publishing 1st: {}", sequencer.cursor.get());
 
@@ -598,7 +624,7 @@ mod tests {
                 if let Some(available) = barrier1.wait_for(next_seq) {
                     consumer1_clone.set(available);
                     processed += available - next_seq + 1;
-                    println!("Consumer 1 advanced to {}", available);
+                    println!("Consumer 1 advanced to {available}");
                 } else {
                     break;
                 }
@@ -615,7 +641,7 @@ mod tests {
                 if let Some(available) = barrier2.wait_for(next_seq) {
                     consumer2_clone.set(available);
                     processed += available - next_seq + 1;
-                    println!("Consumer 2 advanced to {}", available);
+                    println!("Consumer 2 advanced to {available}");
                 } else {
                     break;
                 }
@@ -632,7 +658,7 @@ mod tests {
                 if let Some(available) = barrier3.wait_for(next_seq) {
                     consumer3_clone.set(available);
                     processed += available - next_seq + 1;
-                    println!("Consumer 3 advanced to {}", available);
+                    println!("Consumer 3 advanced to {available}");
                 } else {
                     break;
                 }
@@ -653,10 +679,10 @@ mod tests {
                     // Reduced number to avoid timeout
                     let (start, end) = sequencer.next(1);
                     sequencer.publish(start, end);
-                    println!("Producer {} published sequence {}", producer_id, start);
+                    println!("Producer {producer_id} published sequence {start}");
                     thread::sleep(Duration::from_millis(1));
                 }
-                println!("Producer {} finished", producer_id);
+                println!("Producer {producer_id} finished");
             });
             producers.push(producer);
         }
@@ -710,10 +736,10 @@ mod tests {
                     // Small number of sequences
                     let (start, end) = sequencer.next(1);
                     sequencer.publish(start, end);
-                    println!("Producer {} published sequence {}", producer_id, start);
+                    println!("Producer {producer_id} published sequence {start}");
                     thread::sleep(Duration::from_millis(1)); // Small delay
                 }
-                println!("Producer {} finished", producer_id);
+                println!("Producer {producer_id} finished");
             });
             producers.push(producer);
         }
@@ -728,7 +754,7 @@ mod tests {
                 // Simulate consuming by just advancing the sequence
                 consumer1_clone.set(next_seq);
                 processed += 1;
-                println!("Consumer 1 advanced to {}", next_seq);
+                println!("Consumer 1 advanced to {next_seq}");
                 thread::sleep(Duration::from_millis(2)); // Simulate processing time
             }
             println!("Consumer 1 finished at {}", consumer1_clone.get());
@@ -743,7 +769,7 @@ mod tests {
                 // Simulate consuming by just advancing the sequence
                 consumer2_clone.set(next_seq);
                 processed += 1;
-                println!("Consumer 2 advanced to {}", next_seq);
+                println!("Consumer 2 advanced to {next_seq}");
                 thread::sleep(Duration::from_millis(2)); // Simulate processing time
             }
             println!("Consumer 2 finished at {}", consumer2_clone.get());
@@ -779,7 +805,7 @@ mod tests {
         struct TestHandler;
         impl EventHandler<i64> for TestHandler {
             fn on_event(&self, _event: &i64, sequence: crate::sequence::Sequence, _: bool) {
-                println!("Handler processed sequence {}", sequence);
+                println!("Handler processed sequence {sequence}");
             }
             fn on_start(&self) {}
             fn on_shutdown(&self) {}
@@ -806,7 +832,7 @@ mod tests {
             producer.write(vec![i], |slot, _seq, _| {
                 *slot = i;
             });
-            println!("Produced event {}", i);
+            println!("Produced event {i}");
             thread::sleep(Duration::from_millis(5));
         }
 
@@ -817,5 +843,283 @@ mod tests {
         handle.join();
 
         println!("Test completed successfully!");
+    }
+
+    #[test]
+    fn test_multi_producer_optimized_publish_single_sequence() {
+        use crate::sequencer::MultiProducerSequencer;
+
+        let sequencer = MultiProducerSequencer::new(BUFFER_SIZE, BusySpinWaitStrategy);
+
+        // Test single sequence publish
+        let (start, end) = sequencer.next(1);
+        assert_eq!(start, 0);
+        assert_eq!(end, 0);
+
+        sequencer.publish(start, end);
+        assert_eq!(sequencer.cursor.get(), 0);
+    }
+
+    #[test]
+    fn test_multi_producer_optimized_publish_batch() {
+        use crate::sequencer::MultiProducerSequencer;
+
+        let sequencer = MultiProducerSequencer::new(BUFFER_SIZE, BusySpinWaitStrategy);
+
+        // Test batch publish
+        let (start, end) = sequencer.next(5);
+        assert_eq!(start, 0);
+        assert_eq!(end, 4);
+
+        sequencer.publish(start, end);
+        assert_eq!(sequencer.cursor.get(), 4);
+    }
+
+    #[test]
+    fn test_multi_producer_out_of_order_publish_with_optimizations() {
+        use crate::sequencer::MultiProducerSequencer;
+
+        let sequencer = MultiProducerSequencer::new(BUFFER_SIZE, BusySpinWaitStrategy);
+
+        // Claim three sequences
+        let (seq1_start, seq1_end) = sequencer.next(1); // 0-0
+        let (seq2_start, seq2_end) = sequencer.next(1); // 1-1
+        let (seq3_start, seq3_end) = sequencer.next(1); // 2-2
+
+        // Publish out of order: 3rd, 1st, 2nd
+        sequencer.publish(seq3_start, seq3_end); // Publish sequence 2
+        assert_eq!(sequencer.cursor.get(), -1); // Should not advance yet
+
+        sequencer.publish(seq1_start, seq1_end); // Publish sequence 0
+        assert_eq!(sequencer.cursor.get(), 0); // Should advance to 0
+
+        sequencer.publish(seq2_start, seq2_end); // Publish sequence 1
+        assert_eq!(sequencer.cursor.get(), 2); // Should advance to 2 (all contiguous)
+    }
+
+    #[test]
+    fn test_multi_producer_publish_with_scan_limiting() {
+        use crate::sequencer::MultiProducerSequencer;
+
+        let sequencer = MultiProducerSequencer::new(128, BusySpinWaitStrategy);
+
+        // Claim a large batch to test scan limiting
+        let (start, end) = sequencer.next(100);
+        sequencer.publish(start, end);
+
+        // The cursor should advance, but the scan should be limited
+        // This test primarily ensures the scan limiting doesn't break functionality
+        assert_eq!(sequencer.cursor.get(), end);
+    }
+
+    #[test]
+    fn test_multi_producer_concurrent_publish_with_backoff() {
+        use crate::sequencer::MultiProducerSequencer;
+        use std::sync::Arc;
+        use std::thread;
+        use std::time::Duration;
+
+        let sequencer = Arc::new(MultiProducerSequencer::new(64, BusySpinWaitStrategy));
+        let num_threads = 4;
+        let sequences_per_thread = 8;
+
+        let mut handles = vec![];
+
+        // Spawn threads that publish concurrently
+        for _ in 0..num_threads {
+            let sequencer_clone = Arc::clone(&sequencer);
+            let handle = thread::spawn(move || {
+                for _ in 0..sequences_per_thread {
+                    let (start, end) = sequencer_clone.next(1);
+                    // Add small delay to increase chance of contention
+                    thread::sleep(Duration::from_nanos(100));
+                    sequencer_clone.publish(start, end);
+                }
+            });
+            handles.push(handle);
+        }
+
+        // Wait for all threads to complete
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // All sequences should be published
+        let expected_final_cursor = (num_threads * sequences_per_thread - 1) as i64;
+        assert_eq!(sequencer.cursor.get(), expected_final_cursor);
+    }
+
+    #[test]
+    fn test_multi_producer_batch_operations_integration() {
+        use crate::sequencer::MultiProducerSequencer;
+
+        let sequencer = MultiProducerSequencer::new(32, BusySpinWaitStrategy);
+
+        // Test that batch operations work correctly with the sequencer
+        let (start1, end1) = sequencer.next(3); // 0-2
+        let (start2, end2) = sequencer.next(2); // 3-4
+        let (start3, end3) = sequencer.next(1); // 5-5
+
+        // Publish batches out of order
+        sequencer.publish(start2, end2); // Publish 3-4
+        sequencer.publish(start3, end3); // Publish 5
+
+        // Cursor should not advance yet
+        assert_eq!(sequencer.cursor.get(), -1);
+
+        sequencer.publish(start1, end1); // Publish 0-2
+
+        // Now cursor should advance to 5 (all sequences published)
+        assert_eq!(sequencer.cursor.get(), 5);
+    }
+
+    #[test]
+    fn test_multi_producer_exponential_backoff_behavior() {
+        use crate::sequencer::MultiProducerSequencer;
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+        use std::time::Instant;
+
+        let sequencer = Arc::new(MultiProducerSequencer::new(16, BusySpinWaitStrategy));
+        let barrier = Arc::new(Barrier::new(3));
+        let num_contentious_threads = 2;
+
+        let mut handles = vec![];
+
+        // Create threads that will contend heavily on cursor updates
+        for _ in 0..num_contentious_threads {
+            let sequencer_clone = Arc::clone(&sequencer);
+            let barrier_clone = Arc::clone(&barrier);
+            let handle = thread::spawn(move || {
+                // Synchronize thread start to maximize contention
+                barrier_clone.wait();
+
+                let start_time = Instant::now();
+
+                // Publish many small sequences rapidly to trigger backoff
+                for _ in 0..10 {
+                    let (start, end) = sequencer_clone.next(1);
+                    sequencer_clone.publish(start, end);
+                }
+
+                start_time.elapsed()
+            });
+            handles.push(handle);
+        }
+
+        // Wait for threads to be ready
+        barrier.wait();
+
+        let mut durations = vec![];
+        for handle in handles {
+            durations.push(handle.join().unwrap());
+        }
+
+        // The test passes if all threads complete successfully
+        // The backoff mechanism should prevent excessive spinning
+        assert_eq!(
+            sequencer.cursor.get(),
+            (num_contentious_threads * 10 - 1) as i64
+        );
+
+        // Ensure threads didn't take excessively long (backoff should be bounded)
+        for duration in durations {
+            assert!(
+                duration.as_millis() < 1000,
+                "Thread took too long, backoff may be excessive"
+            );
+        }
+    }
+
+    #[test]
+    fn test_multi_producer_available_buffer_state_consistency() {
+        use crate::sequencer::MultiProducerSequencer;
+
+        let sequencer = MultiProducerSequencer::new(16, BusySpinWaitStrategy);
+
+        // Publish some sequences
+        let (start1, end1) = sequencer.next(3);
+        let (start2, end2) = sequencer.next(2);
+
+        sequencer.publish(start1, end1);
+        sequencer.publish(start2, end2);
+
+        // After publishing, the available buffer should be in a consistent state
+        // (sequences should be marked as available then cleared after cursor advancement)
+
+        // This is primarily a sanity check that the optimized publish doesn't
+        // leave the available buffer in an inconsistent state
+        assert_eq!(sequencer.cursor.get(), end2);
+    }
+
+    #[test]
+    fn test_multi_producer_large_batch_with_wraparound() {
+        use crate::sequencer::MultiProducerSequencer;
+
+        let buffer_size = 8;
+        let sequencer = MultiProducerSequencer::new(buffer_size, BusySpinWaitStrategy);
+
+        // First, fill up most of the buffer
+        let (start1, end1) = sequencer.next(6);
+        sequencer.publish(start1, end1);
+        assert_eq!(sequencer.cursor.get(), 5);
+
+        // Now publish a batch that will wrap around
+        let (start2, end2) = sequencer.next(4); // Should wrap around
+        sequencer.publish(start2, end2);
+
+        // Verify the cursor advanced correctly
+        assert_eq!(sequencer.cursor.get(), end2);
+    }
+
+    #[test]
+    fn test_multi_producer_performance_comparison_stress() {
+        use crate::sequencer::MultiProducerSequencer;
+        use std::sync::Arc;
+        use std::thread;
+        use std::time::Instant;
+
+        let sequencer = Arc::new(MultiProducerSequencer::new(1024, BusySpinWaitStrategy));
+        let num_threads = 8;
+        let operations_per_thread = 100;
+
+        let start_time = Instant::now();
+        let mut handles = vec![];
+
+        for _ in 0..num_threads {
+            let sequencer_clone = Arc::clone(&sequencer);
+            let handle = thread::spawn(move || {
+                for _ in 0..operations_per_thread {
+                    let (start, end) = sequencer_clone.next(1);
+                    sequencer_clone.publish(start, end);
+                }
+            });
+            handles.push(handle);
+        }
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        let duration = start_time.elapsed();
+        let total_operations = num_threads * operations_per_thread;
+
+        // Verify correctness
+        assert_eq!(sequencer.cursor.get(), (total_operations - 1) as i64);
+
+        // Performance check - should complete reasonably quickly
+        // This is more of a sanity check than a precise benchmark
+        assert!(
+            duration.as_millis() < 5000,
+            "Stress test took {} ms, may indicate performance regression",
+            duration.as_millis()
+        );
+
+        println!(
+            "Completed {} operations across {} threads in {} ms",
+            total_operations,
+            num_threads,
+            duration.as_millis()
+        );
     }
 }

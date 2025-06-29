@@ -158,9 +158,9 @@ impl<P: EventProducer<'static, Item = BinanceMessage>> WebsocketSubscriptionHand
                         });
                     }
                     BinanceMessage::SubscriptionResponse { result, id } => {
-                        println!("Subscription response - ID: {}, Result: {:?}", id, result);
+                        println!("Subscription response - ID: {id}, Result: {result:?}");
                     }
-                    _ => println!("Received unknown Binance message: {:?}", message),
+                    _ => println!("Received unknown Binance message: {message:?}"),
                 },
                 Err(error) => self.on_error(&error.to_string()),
             },
@@ -170,16 +170,16 @@ impl<P: EventProducer<'static, Item = BinanceMessage>> WebsocketSubscriptionHand
                 self.disconnect();
                 self.connect();
             }
-            _ => println!("Received unknown message: {:?}", message),
+            _ => println!("Received unknown message: {message:?}"),
         }
     }
 
     fn connect(&mut self) {
         let client_result = tungstenite::client::connect(ENDPOINT);
-        println!("Connection established: {:?}", client_result.is_ok());
+        println!("Connection established: {}", client_result.is_ok());
         match client_result {
             Ok((socket, response)) => {
-                println!("Connection opened: {:?}", response);
+                println!("Connection opened: {response:?}");
                 self.socket = Some(socket);
                 self.on_open();
             }
@@ -198,7 +198,7 @@ impl<P: EventProducer<'static, Item = BinanceMessage>> WebsocketSubscriptionHand
 
     fn on_open(&mut self) {
         let subscribe_message = self.subscribe_message();
-        println!("Connecting to streams: {}", subscribe_message);
+        println!("Connecting to streams: {subscribe_message}");
 
         if let Some(ref mut socket) = self.socket {
             match socket.write_message(tungstenite::Message::Text(subscribe_message)) {
@@ -217,10 +217,10 @@ impl<P: EventProducer<'static, Item = BinanceMessage>> WebsocketSubscriptionHand
     }
 
     fn on_ping(&mut self, data: &[u8]) {
-        println!("Ping: {:?}", data);
+        println!("Ping: {data:?}");
         if let Some(ref mut socket) = self.socket {
             let pong_message = tungstenite::Message::Pong(data.to_vec());
-            println!("Sending pong: {:?}", pong_message);
+            println!("Sending pong: {pong_message:?}");
             match socket.write_message(pong_message) {
                 Ok(_) => (),
                 Err(e) => self.on_error(&format!("Error sending pong: {e}")),

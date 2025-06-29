@@ -23,7 +23,7 @@ struct MarketDataHandler;
 
 impl EventHandlerMut<BinanceMessage> for MarketDataHandler {
     fn on_event(&mut self, _event: &BinanceMessage, _sequence: Sequence, _end_of_batch: bool) {
-        println!("Received message: {:?}", _event);
+        println!("Received message: {_event:?}");
     }
 
     fn on_start(&mut self) {
