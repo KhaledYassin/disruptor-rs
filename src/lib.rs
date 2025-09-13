@@ -9,7 +9,6 @@ pub mod sequencer;
 pub mod traits;
 pub mod utils;
 pub mod waiting;
-pub mod work;
 
 pub use barrier::*;
 pub use builder::*;

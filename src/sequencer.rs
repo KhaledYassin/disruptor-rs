@@ -275,17 +275,17 @@ impl<W: WaitingStrategy> Sequencer for MultiProducerSequencer<W> {
 
         // Adaptive scan limit based on batch size for better cache behavior
         let batch_size = high - low + 1;
-        let scan_limit = if batch_size <= 10 { 
-            256   // Small batches: limited scan to reduce cache misses
-        } else if batch_size <= 100 { 
-            1024  // Medium batches: moderate scan
-        } else { 
-            4096  // Large batches: aggressive scan
+        let scan_limit = if batch_size <= 10 {
+            256 // Small batches: limited scan to reduce cache misses
+        } else if batch_size <= 100 {
+            1024 // Medium batches: moderate scan
+        } else {
+            4096 // Large batches: aggressive scan
         };
 
         // Attempt to advance cursor with bounded retries and exponential backoff
         const MAX_CAS_ATTEMPTS: u32 = 4;
-        
+
         for attempt in 0..MAX_CAS_ATTEMPTS {
             let start = cursor_val + 1;
             let scan_to = std::cmp::min(high + scan_limit, start + scan_limit);

@@ -7,7 +7,6 @@ use disruptor_rs::{
     sequence::Sequence, DisruptorBuilder, EventHandler, EventProcessorExecutor, EventProducer,
     ExecutorHandle,
 };
-use disruptor_rs::work::WorkProcessorFactory;
 use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::Duration;
@@ -234,71 +233,7 @@ fn throughput_multi_producer_multi_consumer(c: &mut Criterion) {
     }
     group.finish();
 
-    // Worker-pool variant: exactly-once processing across N workers
-    let mut group = c.benchmark_group("mpmc_disruptor_worker_pool");
-    group.throughput(Throughput::Elements(ELEMENTS as u64));
-    group.warm_up_time(Duration::from_secs(5));
-    group.measurement_time(Duration::from_secs(5));
-    group.sampling_mode(SamplingMode::Flat);
-
-    for batch_size in [1, 10, 100] {
-        group.bench_with_input(
-            BenchmarkId::from_parameter(batch_size),
-            &batch_size,
-            |b, &batch_size| {
-                b.iter(|| {
-                    let data_provider = Arc::new(RingBuffer::new(BUFFER_SIZE));
-                    let (executor, builder_producer) = DisruptorBuilder::new(data_provider)
-                        .with_busy_spin_waiting_strategy()
-                        .with_multi_producer_sequencer()
-                        .with_barrier(|b| {
-                            // Shared work_sequence across all workers in this pool
-                            let work_sequence = Arc::new(disruptor_rs::sequence::AtomicSequence::new(-1));
-                            for _ in 0..CONSUMER_COUNT {
-                                b.handle_work_mut(Checker {}, &work_sequence);
-                            }
-                        })
-                        .build();
-
-                    let handle = executor.spawn();
-
-                    let producer_arc = Arc::new(builder_producer);
-                    let mut producers = vec![];
-                    let elements_per_producer = ELEMENTS / PRODUCER_COUNT;
-                    for producer_id in 0..PRODUCER_COUNT {
-                        let producer = Arc::clone(&producer_arc);
-                        let start_element = producer_id * elements_per_producer;
-                        let end_element = if producer_id == PRODUCER_COUNT - 1 {
-                            ELEMENTS
-                        } else {
-                            (producer_id + 1) * elements_per_producer
-                        };
-
-                        let p = std::thread::spawn(move || {
-                            for chunk in (start_element..end_element).step_by(batch_size) {
-                                let end = (chunk + batch_size).min(end_element);
-                                let buffer = (chunk..end).collect::<Vec<_>>();
-                                producer.write(buffer, |slot, seq, _| {
-                                    *slot = seq;
-                                });
-                            }
-                        });
-                        producers.push(p);
-                    }
-
-                    for p in producers {
-                        p.join().unwrap();
-                    }
-                    if let Ok(producer) = Arc::try_unwrap(producer_arc) {
-                        producer.drain();
-                    }
-
-                    handle.join();
-                });
-            },
-        );
-    }
-    group.finish();
+    // Worker-pool benchmark removed
 }
 
 criterion_group! {

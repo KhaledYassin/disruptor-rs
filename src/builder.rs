@@ -12,7 +12,6 @@ use crate::{
         Runnable, Sequencer, WaitingStrategy,
     },
     waiting::{BusySpinWaitStrategy, SleepingWaitStrategy, YieldingWaitStrategy},
-    work::WorkProcessorFactory,
     EventHandlerMut, EventProcessorMut,
 };
 
@@ -285,23 +284,7 @@ impl<'a, S: Sequencer + 'a, D: DataProvider<T> + 'a, T: Send + 'a> BarrierScope<
         self.event_handlers.push(runnable);
     }
 
-    /// Add a worker-pool handler (exactly-once processing across N workers).
-    pub fn handle_work<E>(&mut self, handler: E, shared_work_sequence: &Arc<AtomicSequence>)
-    where
-        E: EventHandler<T> + Send + 'a,
-    {
-        let processor = WorkProcessorFactory::create(handler, Arc::clone(shared_work_sequence));
-        self.handle_events_with(processor);
-    }
-
-    /// Add a worker-pool handler with mutable event access.
-    pub fn handle_work_mut<E>(&mut self, handler: E, shared_work_sequence: &Arc<AtomicSequence>)
-    where
-        E: EventHandlerMut<T> + Send + 'a,
-    {
-        let processor = WorkProcessorFactory::create_mut(handler, Arc::clone(shared_work_sequence));
-        self.handle_events_with_mut(processor);
-    }
+    // Worker-pool APIs removed
 
     pub fn with_barrier(mut self, f: impl FnOnce(&mut BarrierScope<'a, S, D, T>)) {
         let mut scope = BarrierScope {

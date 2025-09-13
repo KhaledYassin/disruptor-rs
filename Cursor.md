@@ -13,39 +13,17 @@
 
 ### What “fair apples-to-apples” looks like
 
-- Compare crossbeam’s MPMC work-sharing against a disruptor "worker pool" topology where N workers split the stream; each event is processed exactly once by exactly one worker.
 - Remove per-item assertions from hot paths in benchmarks; replace with `black_box` or guard them behind a feature flag.
-- Keep broadcast fan-out as a separate benchmark group (because it’s an important disruptor use case), but don’t compare it to crossbeam MPMC directly.
 
 ### Plan of Record
 
 1. Benchmark corrections and structure
 
-- Add two disruptor MPMC groups:
-  - mpmc_worker_pool: load-balanced processing (each event processed once).
-  - mpmc_fanout: broadcast (each event processed N times) for visibility.
 - Unify work done by consumers:
   - Replace per-item `assert_eq!` with `black_box` in throughput benches; keep correctness asserts in unit/integration tests.
   - Add a cargo feature `bench_check` to optionally retain asserts for sanity runs.
-- Align batch semantics:
-  - For disruptor worker pool, process contiguous sequences in batches (same as crossbeam sends Vec batches) and `black_box` the slice window.
-- Keep existing SPSC groups, but also remove per-item asserts there for throughput comparability.
 
-2. Implement a proper Worker Pool (exactly-once consumption)
-
-- Introduce a `work` module with a `WorkProcessor<W, D, T>` that claims the next sequence to process using a shared `work_cursor: AtomicSequence`:
-  - Core loop (per worker):
-    - `let next = work_cursor.increment_and_get();`
-    - `barrier.wait_for(next)` to ensure publishers have advanced `cursor` ≥ `next`.
-    - Read `event` at `next`, invoke handler, then set this worker’s sequence to `next`.
-  - Producer gating remains the min over all worker sequences; once all workers have advanced beyond a slot, producer wrap may overwrite.
-- Builder additions:
-  - `.with_worker_pool(|pool| { pool.handle_work(handler_factory()); … })` or `.with_balanced_consumers(n, handler_factory)` to spawn N workers in the same pool.
-  - Ensure workers’ sequences are added as gating sequences of the sequencer (already done for processors), so capacity pressure is based on processed progress.
-- Safety & visibility:
-  - Keep Acquire/Release semantics identical to current processors; visibility relies on `publish` Release + consumer Acquire.
-
-3. MultiProducerSequencer hot-path refinements
+2. MultiProducerSequencer hot-path refinements
 
 - `next(n)` wrap wait:
   - Maintain spin-then-yield policy (good for peak throughput). Add cfg-gate to optionally escalate to short sleeps for power efficiency test cases.
@@ -56,13 +34,13 @@
   - Inline `highest_published_sequence` loop and use unchecked indexing in the tight loop (already mostly done) to reduce bound checks.
 - Consider an optional "progress hint" (non-atomic) that caches recent contiguous end to reduce rescans under heavy contention; only if profiling shows it helps.
 
-4. Processor throughput polish
+3. Processor throughput polish
 
 - Skip `barrier.signal()` for BusySpin strategy (it’s a no-op); keep calls but #[inline(always)] to ensure it disappears for BusySpin.
 - Add #[inline(always)] to hot methods (`get`, `get_mut`, `wait_for`, min-reduction, publish paths) where safe.
 - Optionally add a "batched handler" trait variant that receives a range `[from..=to]` to reduce per-item call overhead in benchmarks; retain current per-item trait for API stability.
 
-5. Instrumentation and profiling hooks
+4. Instrumentation and profiling hooks
 
 - Add a `metrics` feature to collect:
   - CAS attempts/successes on `cursor` advance
@@ -85,10 +63,6 @@
 - PR4: Metrics feature + detailed Criterion output.
 - PR5+: Targeted tuning based on profiles (scan limits, backoff constants, optional progress hint).
 
-### Expected outcomes
-
-- With apples-to-apples benchmarking (work-sharing + no per-item asserts), disruptor worker pool should be competitive with `crossbeam-channel` for large batches and BusySpin on dedicated cores.
-- Fan-out case will remain slower per event than work-sharing by design, but it’s a distinct use case and should be benchmarked separately.
 
 ### Notes and open questions
 
