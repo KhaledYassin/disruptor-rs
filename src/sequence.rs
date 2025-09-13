@@ -84,6 +84,12 @@ impl AtomicSequence {
         self.value.store(new_value, Ordering::Release);
     }
 
+    pub fn compare_and_set(&self, expected: Sequence, new_value: Sequence) -> bool {
+        self.value
+            .compare_exchange(expected, new_value, Ordering::SeqCst, Ordering::Acquire)
+            .is_ok()
+    }
+
     // Increment the sequence by 1 and return the new value.
     pub fn get_and_increment(&self) -> Sequence {
         self.value.fetch_add(1, Ordering::SeqCst)
@@ -92,6 +98,12 @@ impl AtomicSequence {
     // Increment the sequence by 1 and return the old value.
     pub fn increment_and_get(&self) -> Sequence {
         self.value.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    /// Atomically add `delta` to the sequence and return the previous value.
+    #[inline]
+    pub fn get_and_add(&self, delta: Sequence) -> Sequence {
+        self.value.fetch_add(delta, Ordering::SeqCst)
     }
 }
 

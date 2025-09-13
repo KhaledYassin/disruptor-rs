@@ -6,12 +6,12 @@ use crate::{
     producer::Producer,
     ringbuffer::RingBuffer,
     sequence::AtomicSequence,
-    sequencer::SingleProducerSequencer,
+    sequencer::{MultiProducerSequencer, SingleProducerSequencer},
     traits::{
         DataProvider, EventHandler, EventProcessor, EventProcessorExecutor, EventProducer,
         Runnable, Sequencer, WaitingStrategy,
     },
-    waiting::{BusySpinWaitStrategy, YieldingWaitStrategy},
+    waiting::{BusySpinWaitStrategy, SleepingWaitStrategy, YieldingWaitStrategy},
     EventHandlerMut, EventProcessorMut,
 };
 
@@ -183,6 +183,10 @@ where
     pub fn with_yielding_waiting_strategy(self) -> WithWaitingStrategy<YieldingWaitStrategy, D, T> {
         self.with_waiting_strategy()
     }
+
+    pub fn with_sleeping_waiting_strategy(self) -> WithWaitingStrategy<SleepingWaitStrategy, D, T> {
+        self.with_waiting_strategy()
+    }
 }
 
 impl<W: WaitingStrategy, D: DataProvider<T>, T> WithWaitingStrategy<W, D, T>
@@ -201,6 +205,13 @@ where
     ) -> WithSequencer<SingleProducerSequencer<W>, W, D, T> {
         let buffer_size = self.with_data_provider.data_provider.get_capacity();
         self.with_sequencer(SingleProducerSequencer::new(buffer_size, W::new()))
+    }
+
+    pub fn with_multi_producer_sequencer(
+        self,
+    ) -> WithSequencer<MultiProducerSequencer<W>, W, D, T> {
+        let buffer_size = self.with_data_provider.data_provider.get_capacity();
+        self.with_sequencer(MultiProducerSequencer::new(buffer_size, W::new()))
     }
 }
 
