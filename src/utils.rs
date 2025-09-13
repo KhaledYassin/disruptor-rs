@@ -34,94 +34,81 @@ struct CacheAlignedAtomicI64 {
 pub struct AvailableSequenceBuffer {
     available_buffer: Vec<CacheAlignedAtomicI64>,
     index_mask: i64,
+    index_shift: u32,
 }
 
 impl AvailableSequenceBuffer {
     pub fn new(buffer_size: i64) -> Self {
+        let index_shift = (buffer_size as usize).trailing_zeros();
         Self {
             available_buffer: (0..buffer_size)
                 .map(|_| CacheAlignedAtomicI64 {
-                    value: AtomicI64::new(0),
+                    value: AtomicI64::new(-1),
                     _padding: [0u8; 56],
                 })
                 .collect(),
             index_mask: buffer_size - 1,
+            index_shift,
         }
     }
 
+    #[inline]
     pub fn set(&self, sequence: i64) {
-        let index = sequence & self.index_mask;
-        let flag = 1i64 << (sequence & 0x3f);
+        let index = (sequence & self.index_mask) as usize;
+        let generation = sequence >> self.index_shift;
         unsafe {
             self.available_buffer
-                .get_unchecked(index as usize)
+                .get_unchecked(index)
                 .value
-                .fetch_or(flag, Ordering::Release);
+                .store(generation, Ordering::Release);
         }
     }
 
-    pub fn is_set(&self, sequence: i64) -> bool {
-        let index = sequence & self.index_mask;
-        let flag = 1i64 << (sequence & 0x3f);
-        unsafe {
+    #[inline]
+    pub fn is_available(&self, sequence: i64) -> bool {
+        let index = (sequence & self.index_mask) as usize;
+        let expected_generation = sequence >> self.index_shift;
+        let observed = unsafe {
             self.available_buffer
-                .get_unchecked(index as usize)
+                .get_unchecked(index)
                 .value
                 .load(Ordering::Acquire)
-                & flag
-                != 0
-        }
+        };
+        observed == expected_generation
     }
 
-    pub fn unset(&self, sequence: i64) {
-        let index = sequence & self.index_mask;
-        let flag = 1i64 << (sequence & 0x3f);
-        unsafe {
-            self.available_buffer
-                .get_unchecked(index as usize)
-                .value
-                .fetch_and(!flag, Ordering::Release);
-        }
-    }
+    // No longer needed in generation-based design: unset is removed
 
     pub fn set_batch(&self, start: i64, end: i64) {
         if start > end {
             return; // Handle invalid range
         }
 
-        let mut updates: std::collections::HashMap<usize, i64> = std::collections::HashMap::new();
-
         for seq in start..=end {
-            let index = (seq & self.index_mask) as usize;
-            let flag = 1i64 << (seq & 0x3f);
-            *updates.entry(index).or_insert(0) |= flag;
-        }
-
-        for (index, combined_flags) in updates {
-            self.available_buffer[index]
-                .value
-                .fetch_or(combined_flags, Ordering::Release);
+            self.set(seq);
         }
     }
 
-    pub fn unset_batch(&self, start: i64, end: i64) {
-        if start > end {
-            return; // Handle invalid range
+    // No longer needed in generation-based design: unset_batch is removed
+
+    /// Returns the highest contiguous published sequence in [from, to].
+    /// If `from` is not yet available, returns `from - 1`.
+    pub fn highest_published_sequence(&self, from: i64, to: i64) -> i64 {
+        if from > to {
+            return from - 1;
         }
 
-        let mut updates: std::collections::HashMap<usize, i64> = std::collections::HashMap::new();
-
-        for seq in start..=end {
-            let index = (seq & self.index_mask) as usize;
-            let flag = 1i64 << (seq & 0x3f);
-            *updates.entry(index).or_insert(0) |= flag;
+        let mut last = from - 1;
+        let mut seq = from;
+        while seq <= to {
+            if self.is_available(seq) {
+                last = seq;
+                seq += 1;
+            } else {
+                break;
+            }
         }
-
-        for (index, combined_flags) in updates {
-            self.available_buffer[index]
-                .value
-                .fetch_and(!combined_flags, Ordering::Release);
-        }
+        last
     }
 }
 
@@ -180,28 +167,20 @@ mod tests {
     }
 
     #[test]
-    fn test_available_sequence_buffer_batch_operations() {
+    fn test_available_sequence_buffer_generation_basic() {
         let buffer_size = 64;
         let buffer = AvailableSequenceBuffer::new(buffer_size);
 
-        // Test batch setting
         buffer.set_batch(0, 5);
         for i in 0..=5 {
-            assert!(buffer.is_set(i), "Sequence {i} should be set");
+            assert!(buffer.is_available(i), "Sequence {i} should be available");
         }
         for i in 6..buffer_size {
-            assert!(!buffer.is_set(i), "Sequence {i} should not be set");
+            assert!(
+                !buffer.is_available(i),
+                "Sequence {i} should not be available"
+            );
         }
-
-        // Test batch unsetting
-        buffer.unset_batch(2, 4);
-        for i in 0..=1 {
-            assert!(buffer.is_set(i), "Sequence {i} should still be set");
-        }
-        for i in 2..=4 {
-            assert!(!buffer.is_set(i), "Sequence {i} should be unset");
-        }
-        assert!(buffer.is_set(5), "Sequence 5 should still be set");
     }
 
     #[test]
@@ -210,36 +189,17 @@ mod tests {
         let buffer = AvailableSequenceBuffer::new(buffer_size);
 
         // Test batch operations that wrap around the buffer
-        buffer.set_batch(6, 10); // This will wrap around (6,7,0,1,2)
+        buffer.set_batch(6, 10); // This will wrap around indices (6,7,0,1,2)
 
-        assert!(buffer.is_set(6));
-        assert!(buffer.is_set(7));
-        assert!(buffer.is_set(8)); // wraps to index 0
-        assert!(buffer.is_set(9)); // wraps to index 1
-        assert!(buffer.is_set(10)); // wraps to index 2
+        assert!(buffer.is_available(6));
+        assert!(buffer.is_available(7));
+        assert!(buffer.is_available(8)); // wraps to index 0 with next generation
+        assert!(buffer.is_available(9)); // wraps to index 1 with next generation
+        assert!(buffer.is_available(10)); // wraps to index 2 with next generation
 
-        assert!(!buffer.is_set(3));
-        assert!(!buffer.is_set(4));
-        assert!(!buffer.is_set(5));
-    }
-
-    #[test]
-    fn test_batch_operations_same_index_multiple_flags() {
-        let buffer_size = 8;
-        let buffer = AvailableSequenceBuffer::new(buffer_size);
-
-        // Set sequences that map to the same index but different bit positions
-        buffer.set_batch(0, 2); // All map to index 0 with different bit positions
-
-        assert!(buffer.is_set(0)); // bit 0
-        assert!(buffer.is_set(1)); // bit 1
-        assert!(buffer.is_set(2)); // bit 2
-
-        // Unset one of them
-        buffer.unset_batch(1, 1);
-        assert!(buffer.is_set(0));
-        assert!(!buffer.is_set(1));
-        assert!(buffer.is_set(2));
+        assert!(!buffer.is_available(3));
+        assert!(!buffer.is_available(4));
+        assert!(!buffer.is_available(5));
     }
 
     #[test]
@@ -250,35 +210,7 @@ mod tests {
         // Empty ranges should not cause issues
         buffer.set_batch(5, 4); // end < start, should do nothing
         for i in 0..buffer_size {
-            assert!(!buffer.is_set(i));
-        }
-    }
-
-    #[test]
-    fn test_batch_operations_large_range() {
-        let buffer_size = 128; // Use larger buffer to avoid wraparound conflicts
-        let buffer = AvailableSequenceBuffer::new(buffer_size);
-
-        // Test batch covering multiple indices but within reasonable range
-        buffer.set_batch(0, 50);
-
-        // Check that all sequences in the range are set
-        for i in 0..=50 {
-            assert!(buffer.is_set(i), "Sequence {i} should be set");
-        }
-
-        // Unset a portion
-        buffer.unset_batch(20, 30);
-        for i in 20..=30 {
-            assert!(!buffer.is_set(i), "Sequence {i} should be unset");
-        }
-
-        // Check that sequences outside the unset range are still set
-        for i in 0..20 {
-            assert!(buffer.is_set(i), "Sequence {i} should still be set");
-        }
-        for i in 31..=50 {
-            assert!(buffer.is_set(i), "Sequence {i} should still be set");
+            assert!(!buffer.is_available(i));
         }
     }
 
@@ -309,59 +241,44 @@ mod tests {
 
         // Verify all sequences were set correctly
         for i in 0..(num_threads as i64 * sequences_per_thread) {
-            assert!(buffer.is_set(i), "Sequence {i} should be set");
+            assert!(buffer.is_available(i), "Sequence {i} should be available");
         }
     }
 
     #[test]
-    fn test_mixed_individual_and_batch_operations() {
-        let buffer_size = 32;
-        let buffer = AvailableSequenceBuffer::new(buffer_size);
+    fn test_generation_overwrite_on_wrap() {
+        // With size 8, index_shift = 3. Publishing 0 replaces gen=0 at index 0,
+        // publishing 8 replaces with gen=1 at index 0.
+        let buffer = AvailableSequenceBuffer::new(8);
+        buffer.set(0);
+        assert!(buffer.is_available(0));
+        assert!(!buffer.is_available(8));
 
-        // Set some individual sequences
+        buffer.set(8);
+        assert!(buffer.is_available(8));
+        assert!(!buffer.is_available(0));
+    }
+
+    #[test]
+    fn test_highest_published_sequence() {
+        let buffer = AvailableSequenceBuffer::new(16);
+
+        // Nothing published
+        assert_eq!(buffer.highest_published_sequence(0, 10), -1);
+
+        // Publish 0 and 2 (gap at 1)
+        buffer.set(0);
+        buffer.set(2);
+        assert_eq!(buffer.highest_published_sequence(0, 5), 0);
+
+        // Fill the gap
         buffer.set(1);
-        buffer.set(5);
-        buffer.set(10);
+        assert_eq!(buffer.highest_published_sequence(0, 5), 2);
 
-        // Set a batch that overlaps with individual sets
-        buffer.set_batch(8, 12);
+        // From mid-range
+        assert_eq!(buffer.highest_published_sequence(1, 5), 2);
 
-        // Verify all are set
-        assert!(buffer.is_set(1));
-        assert!(buffer.is_set(5));
-        for i in 8..=12 {
-            assert!(buffer.is_set(i));
-        }
-
-        // Unset batch that partially overlaps
-        buffer.unset_batch(10, 15);
-
-        assert!(buffer.is_set(1));
-        assert!(buffer.is_set(5));
-        assert!(buffer.is_set(8));
-        assert!(buffer.is_set(9));
-        for i in 10..=15 {
-            assert!(!buffer.is_set(i));
-        }
-    }
-
-    #[test]
-    fn test_bit_manipulation_edge_cases() {
-        let buffer_size = 8;
-        let buffer = AvailableSequenceBuffer::new(buffer_size);
-
-        // Test sequences that exercise all 64 bits of a single atomic
-        let test_sequences = [0, 1, 63, 64, 65, 127, 128];
-
-        for &seq in &test_sequences {
-            buffer.set(seq);
-            assert!(buffer.is_set(seq), "Sequence {seq} should be set");
-        }
-
-        // Test batch operation across bit boundaries
-        buffer.set_batch(60, 68);
-        for i in 60..=68 {
-            assert!(buffer.is_set(i), "Sequence {i} should be set");
-        }
+        // from > to
+        assert_eq!(buffer.highest_published_sequence(5, 4), 4);
     }
 }

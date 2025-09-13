@@ -243,6 +243,7 @@ impl<W: WaitingStrategy> Sequencer for MultiProducerSequencer<W> {
         // Always refresh the cached minimum before the wrap-point test
         let cached = self.cached_value.get();
         if wrap_point > cached {
+            let mut spins: u32 = 0;
             loop {
                 let min_seq = Utils::get_minimum_sequence(&self.gating_sequences);
                 self.cached_value.set(min_seq);
@@ -250,7 +251,11 @@ impl<W: WaitingStrategy> Sequencer for MultiProducerSequencer<W> {
                     break;
                 }
 
-                std::thread::yield_now();
+                std::hint::spin_loop();
+                spins = spins.wrapping_add(1);
+                if spins & 0xFF == 0 {
+                    std::thread::yield_now();
+                }
             }
         }
 
@@ -258,70 +263,40 @@ impl<W: WaitingStrategy> Sequencer for MultiProducerSequencer<W> {
     }
 
     fn publish(&self, low: Sequence, high: Sequence) {
-        // Use batch setting
+        // Mark published range as available (Release visibility)
         self.available_buffer.set_batch(low, high);
 
-        // Try advancing cursor with backoff on failure
+        // Fast-path: attempt to advance only if the next slot is available.
+        // This allows any publisher that fills the gap at cursor+1 to make progress,
+        // even if it didn't publish that specific sequence.
         let mut cursor_val = self.cursor.get();
-        let mut attempts = 0;
-        const MAX_ATTEMPTS: usize = 3;
+        if !self.available_buffer.is_available(cursor_val + 1) {
+            return;
+        }
 
+        // Attempt to advance cursor to the highest contiguous published sequence
+        const SCAN_LIMIT: i64 = 4096;
         loop {
-            let mut next = cursor_val + 1;
+            let start = cursor_val + 1;
+            let scan_to = std::cmp::max(high, start + SCAN_LIMIT);
+            let contiguous_end = self
+                .available_buffer
+                .highest_published_sequence(start, scan_to);
 
-            // Scan for contiguous sequences - use chunked scanning to balance performance
-            let mut chunk_start = next;
-            const CHUNK_SIZE: i64 = 64;
-
-            loop {
-                let chunk_end = chunk_start + CHUNK_SIZE;
-                let mut chunk_next = chunk_start;
-
-                // Scan within this chunk
-                while chunk_next < chunk_end && self.available_buffer.is_set(chunk_next) {
-                    chunk_next += 1;
-                }
-
-                if chunk_next < chunk_end {
-                    // Found a gap in this chunk
-                    next = chunk_next;
-                    break;
-                } else {
-                    // Chunk is fully contiguous, check if we should continue
-                    next = chunk_next;
-                    chunk_start = chunk_end;
-
-                    // Don't scan indefinitely - limit to reasonable distance
-                    if chunk_start > cursor_val + 1024 {
-                        break;
-                    }
-                }
+            if contiguous_end <= cursor_val {
+                return; // No progress possible
             }
 
-            let contiguous_end = next - 1;
-
-            if contiguous_end > cursor_val {
-                if self.cursor.compare_and_set(cursor_val, contiguous_end) {
-                    // Success - batch unset the flags
-                    self.available_buffer
-                        .unset_batch(cursor_val + 1, contiguous_end);
-                    self.waiting_strategy.signal_all_when_blocking();
-                    break;
-                } else {
-                    // CAS failed, retry with exponential backoff
-                    attempts += 1;
-                    if attempts >= MAX_ATTEMPTS {
-                        break; // Give up to avoid excessive spinning
-                    }
-                    cursor_val = self.cursor.get();
-
-                    // Exponential backoff
-                    for _ in 0..attempts {
-                        std::hint::spin_loop();
-                    }
-                }
+            if self.cursor.compare_and_set(cursor_val, contiguous_end) {
+                self.waiting_strategy.signal_all_when_blocking();
+                return;
             } else {
-                break; // No progress possible
+                let new_cursor = self.cursor.get();
+                if !self.available_buffer.is_available(new_cursor + 1) {
+                    return; // No immediate progress possible
+                }
+                cursor_val = new_cursor;
+                std::hint::spin_loop();
             }
         }
     }
