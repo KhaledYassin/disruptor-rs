@@ -184,3 +184,23 @@ loop {
 - **Fast-path publish:** Avoid repeated scans on out-of-order publishes.
 - **Smaller gains:** Atomic ordering relaxation, `spin_loop` hints.
 - **Overall:** Closes much of the throughput gap vs crossbeam MPMC channels.
+
+---
+
+## Results (Criterion)
+
+- Environment: macOS 15.6.1, Apple M4 Pro
+- Commit: 79e0dcd
+
+- mpmc_disruptor throughput (higher is better):
+  - batch=1: 4.09–4.21 Melem/s
+  - batch=10: 10.84–10.92 Melem/s
+  - batch=100: 12.31–12.35 Melem/s
+
+- mpmc baseline:
+  - batch=1: 3.33–3.37 Melem/s
+  - batch=10: 14.68–14.86 Melem/s
+  - batch=100: 15.40–15.62 Melem/s
+
+Notes:
+- Some regressions were observed at smaller batch sizes compared to prior runs; results can vary with thermal and scheduler conditions. The publish scan behavior remains unchanged and tests cover out-of-order and wrap-around cases.
