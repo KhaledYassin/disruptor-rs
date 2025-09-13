@@ -8,20 +8,36 @@ use crate::sequence::AtomicSequence;
 pub struct Utils;
 
 impl Utils {
+    #[inline]
     pub fn get_minimum_sequence(sequences: &[Arc<AtomicSequence>]) -> i64 {
         if sequences.is_empty() {
-            i64::MAX
-        } else {
-            sequences.iter().map(|s| s.get()).min().unwrap()
+            return i64::MAX;
         }
+        // Manual tight loop to avoid iterator overhead in hot path
+        let mut min_val = i64::MAX;
+        // SAFETY: read-only loads with Acquire; Arc references are valid
+        for s in sequences {
+            let v = s.get();
+            if v < min_val {
+                min_val = v;
+            }
+        }
+        min_val
     }
 
+    #[inline]
     pub fn get_maximum_sequence(sequences: &[Arc<AtomicSequence>]) -> i64 {
         if sequences.is_empty() {
-            i64::MIN
-        } else {
-            sequences.iter().map(|s| s.get()).max().unwrap()
+            return i64::MIN;
         }
+        let mut max_val = i64::MIN;
+        for s in sequences {
+            let v = s.get();
+            if v > max_val {
+                max_val = v;
+            }
+        }
+        max_val
     }
 }
 

@@ -1,290 +1,105 @@
-# Disruptor Performance Optimization Plan
+### Goal
 
-## Executive Summary
+- Elevate MPMC throughput to match or exceed `crossbeam-channel` under fair, comparable conditions.
+- Keep correctness, simplicity, and configurability (waiting strategies) intact.
 
-The multi-producer disruptor implementation is unable to match crossbeam channel performance due to several critical bottlenecks. This plan identifies the root causes and provides a systematic approach to achieve competitive throughput.
+### Key Findings (from code + benches)
 
-**Current Performance Gap**: Crossbeam channels significantly outperform the disruptor, particularly at higher batch sizes where channels achieve 15.4 Melem/s vs disruptor's 12.3 Melem/s (batch=100).
+- "MPMC disruptor" bench is a broadcast fan-out: each consumer processes every event. In the disruptor builder, `with_barrier(|b| for _ in 0..CONSUMER_COUNT { b.handle_events_mut(…); })` wires N identical consumers behind the same barrier, all gated by the sequencer `cursor`. That is a fan-out graph (each event handled N times), not work-sharing.
+- Crossbeam MPMC bench measures a load-balanced queue: each batch is received exactly once by a single consumer.
+- Disruptor consumers perform extra per-item assertions (`assert_eq!(*event, sequence)`), while the crossbeam bench uses `black_box(batch)` without per-item checks. This skews results significantly against the disruptor.
+- `MultiProducerSequencer` is fundamentally sound (generation-based `AvailableSequenceBuffer`, CAS cursor advance with bounded retries/backoff, wrap-point pressure against the min gating sequence). Remaining costs are mostly contention (CAS on `cursor`), scanning for contiguity, and repeated min-sequence reductions over all consumer sequences.
+- Producer waiting under wrap pressure is pure spin/yield; consumers are strategy-driven. There’s no producer-side strategy to block/park under sustained backpressure (may be fine for max-throughput, but we should be explicit per benchmark).
 
----
+### What “fair apples-to-apples” looks like
 
-## Root Cause Analysis
+- Compare crossbeam’s MPMC work-sharing against a disruptor "worker pool" topology where N workers split the stream; each event is processed exactly once by exactly one worker.
+- Remove per-item assertions from hot paths in benchmarks; replace with `black_box` or guard them behind a feature flag.
+- Keep broadcast fan-out as a separate benchmark group (because it’s an important disruptor use case), but don’t compare it to crossbeam MPMC directly.
 
-After thorough code analysis, I've identified the following critical performance bottlenecks:
+### Plan of Record
 
-### 1. **Available Buffer Implementation Inefficiency**
-**Location**: `src/utils.rs:86-94` (`set_batch` method)
-**Issue**: The current generation-based design in `AvailableSequenceBuffer` is actually well-optimized, but the implementation has room for micro-optimizations.
+1. Benchmark corrections and structure
 
-```rust
-// Current implementation
-pub fn set_batch(&self, start: i64, end: i64) {
-    if start > end {
-        return; // Handle invalid range
-    }
-    for seq in start..=end {
-        self.set(seq);  // Individual calls to set()
-    }
-}
-```
+- Add two disruptor MPMC groups:
+  - mpmc_worker_pool: load-balanced processing (each event processed once).
+  - mpmc_fanout: broadcast (each event processed N times) for visibility.
+- Unify work done by consumers:
+  - Replace per-item `assert_eq!` with `black_box` in throughput benches; keep correctness asserts in unit/integration tests.
+  - Add a cargo feature `bench_check` to optionally retain asserts for sanity runs.
+- Align batch semantics:
+  - For disruptor worker pool, process contiguous sequences in batches (same as crossbeam sends Vec batches) and `black_box` the slice window.
+- Keep existing SPSC groups, but also remove per-item asserts there for throughput comparability.
 
-### 2. **Suboptimal Publish Path Scanning**
-**Location**: `src/sequencer.rs:265-302` (`publish` method)
-**Issue**: The publish method performs expensive scans even when cursor advancement is unlikely.
+2. Implement a proper Worker Pool (exactly-once consumption)
 
-Key problems:
-- Always calls `highest_published_sequence` even for out-of-order publishes
-- SCAN_LIMIT of 4096 may be too aggressive for small batches
-- CAS loop with spin_loop but no exponential backoff
+- Introduce a `work` module with a `WorkProcessor<W, D, T>` that claims the next sequence to process using a shared `work_cursor: AtomicSequence`:
+  - Core loop (per worker):
+    - `let next = work_cursor.increment_and_get();`
+    - `barrier.wait_for(next)` to ensure publishers have advanced `cursor` ≥ `next`.
+    - Read `event` at `next`, invoke handler, then set this worker’s sequence to `next`.
+  - Producer gating remains the min over all worker sequences; once all workers have advanced beyond a slot, producer wrap may overwrite.
+- Builder additions:
+  - `.with_worker_pool(|pool| { pool.handle_work(handler_factory()); … })` or `.with_balanced_consumers(n, handler_factory)` to spawn N workers in the same pool.
+  - Ensure workers’ sequences are added as gating sequences of the sequencer (already done for processors), so capacity pressure is based on processed progress.
+- Safety & visibility:
+  - Keep Acquire/Release semantics identical to current processors; visibility relies on `publish` Release + consumer Acquire.
 
-### 3. **Atomic Ordering Overhead**
-**Location**: `src/sequence.rs:89` (`compare_and_set`)
-**Issue**: Uses `AcqRel/Acquire` which is correct but may be more expensive than necessary in some cases.
+3. MultiProducerSequencer hot-path refinements
 
-### 4. **Producer Capacity Wait Inefficiency**  
-**Location**: `src/sequencer.rs:246-260` (`next` method)
-**Issue**: Capacity waiting uses manual spin with `yield_now` instead of integrating with the waiting strategy.
+- `next(n)` wrap wait:
+  - Maintain spin-then-yield policy (good for peak throughput). Add cfg-gate to optionally escalate to short sleeps for power efficiency test cases.
+  - Micro-optimize `Utils::get_minimum_sequence` (tight for-loops, avoid iterator overhead; potential small unroll for ≤8 consumers).
+- `publish(low, high)` cursor advance:
+  - Keep the fast-path check `is_available(cursor+1)` to avoid unnecessary scans.
+  - Retain bounded CAS attempts with short exponential backoff (present). Tweak constants via `const` for tuning without logic churn.
+  - Inline `highest_published_sequence` loop and use unchecked indexing in the tight loop (already mostly done) to reduce bound checks.
+- Consider an optional "progress hint" (non-atomic) that caches recent contiguous end to reduce rescans under heavy contention; only if profiling shows it helps.
 
-```rust
-// Current approach in next()
-let mut spins: u32 = 0;
-loop {
-    let min_seq = Utils::get_minimum_sequence(&self.gating_sequences);
-    // ... capacity check ...
-    std::hint::spin_loop();
-    spins = spins.wrapping_add(1);
-    if spins & 0xFF == 0 {
-        std::thread::yield_now();
-    }
-}
-```
+4. Processor throughput polish
 
-### 5. **Memory Access Patterns**
-**Issue**: Cache line thrashing from concurrent access to shared sequences and buffer slots.
+- Skip `barrier.signal()` for BusySpin strategy (it’s a no-op); keep calls but #[inline(always)] to ensure it disappears for BusySpin.
+- Add #[inline(always)] to hot methods (`get`, `get_mut`, `wait_for`, min-reduction, publish paths) where safe.
+- Optionally add a "batched handler" trait variant that receives a range `[from..=to]` to reduce per-item call overhead in benchmarks; retain current per-item trait for API stability.
 
----
+5. Instrumentation and profiling hooks
 
-## Optimization Strategy
+- Add a `metrics` feature to collect:
+  - CAS attempts/successes on `cursor` advance
+  - Producer wrap waits (iterations, yields)
+  - Min-reduction counts
+  - Highest-contiguous scan length
+- Use `criterion` custom measurements to report these alongside throughput.
 
-### Phase 1: Micro-optimize Available Buffer (Low Risk, Medium Impact)
+6. Validation, tests, and regression protection
 
-**Optimize batch operations**:
-```rust
-// Proposed optimization in set_batch
-pub fn set_batch(&self, start: i64, end: i64) {
-    if start > end { return; }
-    
-    // Batch calculate generations to reduce division overhead
-    let start_index = (start & self.index_mask) as usize;
-    let end_index = (end & self.index_mask) as usize;
-    let start_gen = start >> self.index_shift;
-    
-    if start_index <= end_index {
-        // No wraparound case - can potentially vectorize
-        for (i, seq) in (start..=end).enumerate() {
-            let index = start_index + i;
-            let generation = start_gen + ((seq - start) >> self.index_shift);
-            unsafe {
-                self.available_buffer.get_unchecked(index)
-                    .value.store(generation, Ordering::Release);
-            }
-        }
-    } else {
-        // Wraparound case - fall back to individual calls
-        for seq in start..=end {
-            self.set(seq);
-        }
-    }
-}
-```
+- Unit tests for worker-pool exactly-once semantics under concurrency (multiple workers, out-of-order publish, wrap-around).
+- Stress tests: high contention (many producers, small buffer), ensuring no deadlocks and cursor monotonicity.
+- Preserve existing broadcast tests; add worker-pool test variants.
 
-### Phase 2: Optimize Publish Path (High Risk, High Impact)
+7. Rollout & PRs (incremental)
 
-**Smart scanning with adaptive limits**:
-```rust
-fn publish(&self, low: Sequence, high: Sequence) {
-    // Mark published range as available
-    self.available_buffer.set_batch(low, high);
-    
-    // Fast path: only advance if we're filling the gap
-    let cursor_val = self.cursor.get();
-    if low != cursor_val + 1 {
-        return; // Out of order publish, let someone else advance
-    }
-    
-    // Adaptive scan limit based on batch size
-    let batch_size = high - low + 1;
-    let scan_limit = if batch_size <= 10 { 
-        256 
-    } else if batch_size <= 100 { 
-        1024 
-    } else { 
-        4096 
-    };
-    
-    // Try to advance cursor with bounded retries
-    const MAX_CAS_ATTEMPTS: u32 = 3;
-    for attempt in 0..MAX_CAS_ATTEMPTS {
-        let start = cursor_val + 1;
-        let scan_to = std::cmp::min(high + scan_limit, start + scan_limit);
-        let contiguous_end = self.available_buffer
-            .highest_published_sequence(start, scan_to);
-            
-        if contiguous_end > cursor_val {
-            if self.cursor.compare_and_set(cursor_val, contiguous_end) {
-                self.waiting_strategy.signal_all_when_blocking();
-                return;
-            }
-        }
-        
-        // Exponential backoff for contention
-        for _ in 0..(1 << attempt) {
-            std::hint::spin_loop();
-        }
-    }
-}
-```
+- PR1: Bench fixes (remove asserts under default bench, add fanout vs worker-pool groups, no functional changes).
+- PR2: Worker pool API + implementation (minimal tune, correctness first).
+- PR3: Micro-optimizations (min-reduction, inlining, small constants, optional producer waiting cfg).
+- PR4: Metrics feature + detailed Criterion output.
+- PR5+: Targeted tuning based on profiles (scan limits, backoff constants, optional progress hint).
 
-### Phase 3: Reduce Atomic Ordering Cost (Low Risk, Low Impact)
+### Expected outcomes
 
-Keep current `AcqRel/Acquire` ordering as it's correct and the performance gain would be minimal.
+- With apples-to-apples benchmarking (work-sharing + no per-item asserts), disruptor worker pool should be competitive with `crossbeam-channel` for large batches and BusySpin on dedicated cores.
+- Fan-out case will remain slower per event than work-sharing by design, but it’s a distinct use case and should be benchmarked separately.
 
-### Phase 4: Improve Producer Waiting (Medium Risk, Medium Impact)
+### Notes and open questions
 
-**Integrate with waiting strategy**:
-```rust
-fn next(&self, n: Sequence) -> (Sequence, Sequence) {
-    let next = self.high_water_mark.get_and_add(n);
-    let end = next + n;
-    let wrap_point = end - self.buffer_size;
-    
-    let cached = self.cached_value.get();
-    if wrap_point > cached {
-        // Use waiting strategy for consistent backoff behavior
-        let min_sequences = vec![]; // Collect gating sequences
-        if let Some(new_min) = self.waiting_strategy.wait_for(
-            wrap_point, 
-            &self.gating_sequences, 
-            || false
-        ) {
-            self.cached_value.set(new_min);
-        }
-    }
-    
-    (next + 1, end)
-}
-```
+- Thread pinning and affinity (platform dependent) may affect peak results; consider optional pinning in benches behind a feature flag.
+- Prefetching: if we decide to use a prefetch helper crate, gate it behind a feature and verify portability.
+- Do not relax memory orderings without a written proof of correctness; the current Acquire/Release scheme is conservative and safe.
 
-### Phase 5: Memory Layout Optimizations (High Risk, High Impact)
+### Minimal code touch map (for implementation phase)
 
-**Separate hot/cold data**:
-- Keep frequently accessed fields (cursor, high_water_mark) in separate cache lines
-- Consider NUMA-aware allocation for large ring buffers
-- Add prefetch hints for sequential access patterns
-
----
-
-## Implementation Plan
-
-### Sprint 1: Foundation (Week 1)
-1. ✅ **Benchmark baseline performance** - establish current metrics
-2. **Implement adaptive scanning** in publish path
-3. **Add exponential backoff** to CAS loops
-4. **Micro-optimize set_batch** for sequential case
-
-### Sprint 2: Core Optimizations (Week 2)  
-1. **Implement smart publish path** with gap detection
-2. **Integrate waiting strategy** into producer capacity waiting
-3. **Add prefetch hints** for ring buffer access
-4. **Comprehensive testing** of optimizations
-
-### Sprint 3: Advanced Optimizations (Week 3)
-1. **Memory layout improvements** - separate hot/cold data
-2. **NUMA-aware optimizations** for large buffers
-3. **Vectorization opportunities** in batch operations
-4. **Final performance validation**
-
----
-
-## Risk Assessment
-
-### High Risk Changes
-- **Memory layout modifications**: Could introduce subtle bugs or cache line misalignment
-- **Publish path logic changes**: Critical for correctness, extensive testing required
-
-### Medium Risk Changes  
-- **Waiting strategy integration**: May affect blocking behavior
-- **Adaptive scanning limits**: Could impact fairness
-
-### Low Risk Changes
-- **Micro-optimizations in set_batch**: Isolated changes with clear benefits
-- **Exponential backoff**: Standard technique with predictable behavior
-
----
-
-## Success Metrics
-
-### Primary Goals
-1. **Match crossbeam performance**: Achieve ≥15 Melem/s at batch=100
-2. **Maintain correctness**: Pass all existing tests
-3. **Preserve latency characteristics**: Keep low-latency benefits
-
-### Secondary Goals  
-1. **Improve small batch performance**: Target >5 Melem/s at batch=1
-2. **Reduce CPU usage**: Lower spin costs in contention scenarios
-3. **Better scaling**: Linear throughput scaling with producer count
-
-### Benchmark Targets
-| Batch Size | Current (Melem/s) | Target (Melem/s) | Stretch (Melem/s) |
-|------------|-------------------|------------------|-------------------|
-| 1          | 4.2               | 6.0              | 8.0               |
-| 10         | 10.9              | 15.0             | 18.0              |
-| 100        | 12.3              | 15.5             | 20.0              |
-
----
-
-## Validation Strategy
-
-### Unit Testing
-- Extend existing test coverage for edge cases
-- Add specific tests for optimization paths
-- Stress test with high contention scenarios
-
-### Performance Testing
-- Before/after benchmarks for each optimization
-- Cross-platform validation (x86, ARM)
-- Memory usage profiling
-
-### Correctness Validation
-- Property-based testing for publish ordering
-- Long-running stability tests
-- Race condition detection with thread sanitizer
-
----
-
-## Backup Plan
-
-If optimizations don't achieve target performance:
-
-1. **Alternative available buffer designs**:
-   - Bit-packed availability flags
-   - Lock-free MPMC queue for published sequences
-
-2. **Fundamental architecture changes**:
-   - Segment-based ring buffer to reduce contention
-   - Per-producer sequence tracking
-
-3. **Hybrid approaches**:
-   - Use crossbeam channels internally for coordination
-   - Maintain disruptor API for compatibility
-
----
-
-## Next Steps
-
-1. **Immediate**: Begin Phase 1 implementation with adaptive scanning
-2. **Week 1**: Complete micro-optimizations and establish new baseline  
-3. **Week 2**: Implement core publish path improvements
-4. **Week 3**: Advanced optimizations and final validation
-
-The goal is to systematically eliminate performance bottlenecks while maintaining the disruptor's correctness guarantees and low-latency characteristics.
+- New: `src/work.rs` (WorkProcessor, WorkerPool types)
+- Update: `src/builder.rs` (builder path for worker pools)
+- Update: `benches/throughput.rs` (bench groups + fairness)
+- Update: `src/utils.rs` (fast min reduction)
+- Optional: `src/sequencer.rs` (tiny tunables, inlining), `src/waiting.rs` (cfg’d producer waiting policy)
