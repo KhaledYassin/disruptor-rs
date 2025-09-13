@@ -39,6 +39,10 @@ pub struct AvailableSequenceBuffer {
 
 impl AvailableSequenceBuffer {
     pub fn new(buffer_size: i64) -> Self {
+        assert!(
+            buffer_size > 0 && (buffer_size as u64).is_power_of_two(),
+            "AvailableSequenceBuffer size must be power-of-two"
+        );
         let index_shift = (buffer_size as usize).trailing_zeros();
         Self {
             available_buffer: (0..buffer_size)
@@ -181,6 +185,12 @@ mod tests {
                 "Sequence {i} should not be available"
             );
         }
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_available_buffer_rejects_non_power_of_two() {
+        let _ = AvailableSequenceBuffer::new(12); // not a power of two
     }
 
     #[test]

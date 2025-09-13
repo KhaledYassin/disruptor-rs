@@ -167,7 +167,7 @@ impl<W: WaitingStrategy> Sequencer for SingleProducerSequencer<W> {
         }
 
         // All events are processed – now signal shutdown so processors can exit cleanly
-        self.is_done.store(true, Ordering::SeqCst);
+        self.is_done.store(true, Ordering::Relaxed);
         // Final wake-up to ensure blocked threads observe the shutdown signal
         self.waiting_strategy.signal_all_when_blocking();
     }
@@ -175,7 +175,7 @@ impl<W: WaitingStrategy> Sequencer for SingleProducerSequencer<W> {
 
 impl<W: WaitingStrategy> Drop for SingleProducerSequencer<W> {
     fn drop(&mut self) {
-        self.is_done.store(true, Ordering::SeqCst);
+        self.is_done.store(true, Ordering::Relaxed);
         self.waiting_strategy.signal_all_when_blocking();
     }
 }
@@ -306,7 +306,7 @@ impl<W: WaitingStrategy> Sequencer for MultiProducerSequencer<W> {
         while Utils::get_minimum_sequence(&self.gating_sequences) < current {
             self.waiting_strategy.signal_all_when_blocking();
         }
-        self.is_done.store(true, Ordering::SeqCst);
+        self.is_done.store(true, Ordering::Relaxed);
         self.waiting_strategy.signal_all_when_blocking();
     }
 
@@ -321,7 +321,7 @@ impl<W: WaitingStrategy> Sequencer for MultiProducerSequencer<W> {
 
 impl<W: WaitingStrategy> Drop for MultiProducerSequencer<W> {
     fn drop(&mut self) {
-        self.is_done.store(true, Ordering::SeqCst);
+        self.is_done.store(true, Ordering::Relaxed);
         self.waiting_strategy.signal_all_when_blocking();
     }
 }
