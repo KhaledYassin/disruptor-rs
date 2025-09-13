@@ -55,7 +55,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use crate::barrier::ProcessingSequenceBarrier;
+use crate::barrier::{MpmcSequenceBarrier, ProcessingSequenceBarrier};
 use crate::sequence::{AtomicSequence, Sequence};
 use crate::traits::Sequencer;
 use crate::traits::WaitingStrategy;
@@ -180,7 +180,14 @@ impl<W: WaitingStrategy> Drop for SingleProducerSequencer<W> {
     }
 }
 
-/// A sequencer optimized for multiple producers.
+/// A sequencer optimized for multiple producers (MPMC).
+///
+/// Producers claim unique sequences via a monotonic `high_water_mark` and
+/// then publish by marking the corresponding slots ready in the
+/// [`AvailableSequenceBuffer`]. Consumers wait on a barrier that observes
+/// per-slot readiness, removing the need for a publisher-advanced contiguous
+/// cursor. Backpressure is enforced by tracking the minimum of consumer
+/// sequences to avoid overwriting unprocessed data when the ring wraps.
 pub struct MultiProducerSequencer<W: WaitingStrategy> {
     buffer_size: i64,
     cursor: Arc<AtomicSequence>,
@@ -189,10 +196,15 @@ pub struct MultiProducerSequencer<W: WaitingStrategy> {
     gating_sequences: Vec<Arc<AtomicSequence>>,
     waiting_strategy: Arc<W>,
     is_done: Arc<AtomicBool>,
-    available_buffer: AvailableSequenceBuffer,
+    available_buffer: Arc<AvailableSequenceBuffer>,
 }
 
 impl<W: WaitingStrategy> MultiProducerSequencer<W> {
+    /// Create a new `MultiProducerSequencer`.
+    ///
+    /// - `buffer_size` must be a power of two.
+    /// - `waiting_strategy` controls how threads coordinate when they cannot
+    ///   make immediate progress.
     pub fn new(buffer_size: usize, waiting_strategy: W) -> Self {
         Self {
             buffer_size: buffer_size as i64,
@@ -202,17 +214,13 @@ impl<W: WaitingStrategy> MultiProducerSequencer<W> {
             gating_sequences: Vec::new(),
             waiting_strategy: Arc::new(waiting_strategy),
             is_done: Arc::new(AtomicBool::new(false)),
-            available_buffer: AvailableSequenceBuffer::new(buffer_size as i64),
+            available_buffer: Arc::new(AvailableSequenceBuffer::new(buffer_size as i64)),
         }
     }
-
-    // fn has_available_capacity(&self, high_water_mark: Sequence, n: Sequence) -> bool {
-    //     high_water_mark + n - Utils::get_minimum_sequence(&self.gating_sequences) < self.buffer_size
-    // }
 }
 
 impl<W: WaitingStrategy> Sequencer for MultiProducerSequencer<W> {
-    type Barrier = ProcessingSequenceBarrier<W>;
+    type Barrier = MpmcSequenceBarrier<W>;
 
     fn add_gating_sequence(&mut self, sequence: &Arc<AtomicSequence>) {
         self.gating_sequences.push(sequence.clone());
@@ -235,15 +243,35 @@ impl<W: WaitingStrategy> Sequencer for MultiProducerSequencer<W> {
         self.cursor.clone()
     }
 
+    /// Claim the next `n` sequences and return `(low, high)` inclusive.
+    ///
+    /// On the uncontended fast-path, this is a single atomic fetch-add.
+    /// When the ring is close to wrapping, the method refreshes the cached
+    /// minimum consumer sequence to enforce backpressure and prevent
+    /// overwrites. A bounded backoff loop is used only if wrap pressure is
+    /// still present after a refresh.
     fn next(&self, n: Sequence) -> (Sequence, Sequence) {
         let next = self.high_water_mark.get_and_add(n);
         let end = next + n;
         let wrap_point = end - self.buffer_size;
 
-        // Always refresh the cached minimum before the wrap-point test
-        let cached = self.cached_value.get();
+        // Tune refresh cadence: refresh less frequently on the fast-path,
+        // and always refresh when under wrap pressure.
+        const REFRESH_MASK: i64 = 0x3FF; // 1024 - 1
+        let mut cached = self.cached_value.get();
         if wrap_point > cached {
-            let mut spins: u32 = 0;
+            // Immediate refresh when close to wrapping to avoid overwrites
+            cached = Utils::get_minimum_sequence(&self.gating_sequences);
+            self.cached_value.set(cached);
+        } else if (next & REFRESH_MASK) == 0 {
+            // Periodic refresh on non-wrap fast-path
+            cached = Utils::get_minimum_sequence(&self.gating_sequences);
+            self.cached_value.set(cached);
+        }
+
+        if wrap_point > cached {
+            // Tighter backoff loop with fewer atomic operations
+            let mut spins = 0u32;
             loop {
                 let min_seq = Utils::get_minimum_sequence(&self.gating_sequences);
                 self.cached_value.set(min_seq);
@@ -251,10 +279,14 @@ impl<W: WaitingStrategy> Sequencer for MultiProducerSequencer<W> {
                     break;
                 }
 
-                std::hint::spin_loop();
-                spins = spins.wrapping_add(1);
-                if spins & 0xFF == 0 {
+                spins = spins.saturating_add(1);
+                if spins < 64 {
+                    std::hint::spin_loop();
+                } else if spins < 128 {
                     std::thread::yield_now();
+                } else {
+                    std::thread::sleep(std::time::Duration::from_nanos(1));
+                    spins = 0;
                 }
             }
         }
@@ -262,74 +294,38 @@ impl<W: WaitingStrategy> Sequencer for MultiProducerSequencer<W> {
         (next + 1, end)
     }
 
+    /// Publish the inclusive range `[low, high]` by marking slots as
+    /// available in the `AvailableSequenceBuffer`.
+    ///
+    /// This does not advance any shared cursor; consumers rely on their
+    /// barriers to discover per-slot readiness and contiguous ranges.
     fn publish(&self, low: Sequence, high: Sequence) {
-        // Mark published range as available (Release visibility)
+        // Mark published range as available; do not advance cursor here.
         self.available_buffer.set_batch(low, high);
-
-        // Fast-path check: only attempt cursor advancement if the next slot is available
-        // This provides the key optimization while maintaining correctness
-        let mut cursor_val = self.cursor.get();
-        if !self.available_buffer.is_available(cursor_val + 1) {
-            return; // Gap at cursor+1, no advancement possible
-        }
-
-        // Adaptive scan limit based on batch size for better cache behavior
-        let batch_size = high - low + 1;
-        let scan_limit = if batch_size <= 10 {
-            256 // Small batches: limited scan to reduce cache misses
-        } else if batch_size <= 100 {
-            1024 // Medium batches: moderate scan
-        } else {
-            4096 // Large batches: aggressive scan
-        };
-
-        // Attempt to advance cursor with bounded retries and exponential backoff
-        const MAX_CAS_ATTEMPTS: u32 = 4;
-
-        for attempt in 0..MAX_CAS_ATTEMPTS {
-            let start = cursor_val + 1;
-            let scan_to = std::cmp::min(high + scan_limit, start + scan_limit);
-            let contiguous_end = self
-                .available_buffer
-                .highest_published_sequence(start, scan_to);
-
-            if contiguous_end <= cursor_val {
-                return; // No progress possible
-            }
-
-            if self.cursor.compare_and_set(cursor_val, contiguous_end) {
-                self.waiting_strategy.signal_all_when_blocking();
-                return;
-            }
-
-            // CAS failed - check if we can still make progress
-            let new_cursor = self.cursor.get();
-            if !self.available_buffer.is_available(new_cursor + 1) {
-                return; // No immediate progress possible
-            }
-            cursor_val = new_cursor;
-
-            // Exponential backoff to reduce contention
-            let backoff_cycles = 1_u32 << std::cmp::min(attempt, 6); // Cap at 64 spin loops
-            for _ in 0..backoff_cycles {
-                std::hint::spin_loop();
-            }
-        }
+        self.waiting_strategy.signal_all_when_blocking();
     }
 
+    /// Block until all consumers have processed up to the highest contiguous
+    /// published sequence, then signal shutdown.
     fn drain(self) {
-        let current = self.cursor.get();
-        while Utils::get_minimum_sequence(&self.gating_sequences) < current {
+        // Determine the highest contiguous published sequence up to the claimed high-water mark.
+        let claimed = self.high_water_mark.get();
+        let target = self.available_buffer.highest_published_sequence(0, claimed);
+
+        // Wait for all consumers to process up to target.
+        while Utils::get_minimum_sequence(&self.gating_sequences) < target {
             self.waiting_strategy.signal_all_when_blocking();
+            std::thread::yield_now();
         }
+
         self.is_done.store(true, Ordering::Relaxed);
         self.waiting_strategy.signal_all_when_blocking();
     }
 
-    fn create_sequence_barrier(&self, gating_sequences: &[Arc<AtomicSequence>]) -> Self::Barrier {
-        ProcessingSequenceBarrier::new(
+    fn create_sequence_barrier(&self, _gating_sequences: &[Arc<AtomicSequence>]) -> Self::Barrier {
+        MpmcSequenceBarrier::new(
             self.is_done.clone(),
-            Vec::from(gating_sequences),
+            self.available_buffer.clone(),
             self.waiting_strategy.clone(),
         )
     }
@@ -423,7 +419,7 @@ mod tests {
         sequencer.publish(start, end);
         println!("Published successfully");
 
-        assert_eq!(sequencer.cursor.get(), 0);
+        assert!(sequencer.available_buffer.is_available(0));
         println!("Test completed successfully!");
     }
 
@@ -446,7 +442,10 @@ mod tests {
 
         println!("Testing publish()...");
         sequencer.publish(start, end);
-        println!("Published successfully, cursor: {}", sequencer.cursor.get());
+        println!(
+            "Published successfully, available[0]: {}",
+            sequencer.available_buffer.is_available(0)
+        );
 
         // Now try to fill up the buffer
         println!("Filling buffer to test wrap-around...");
@@ -455,7 +454,11 @@ mod tests {
             let (s, e) = sequencer.next(1);
             println!("Got range: {s} to {e}");
             sequencer.publish(s, e);
-            println!("Published sequence {i}, cursor: {}", sequencer.cursor.get());
+            println!(
+                "Published sequence {i}, available[{}]: {}",
+                i,
+                sequencer.available_buffer.is_available(i as i64)
+            );
         }
 
         // Now simulate consumers making progress before trying wrap-around
@@ -466,8 +469,7 @@ mod tests {
         // This should now work since consumers have made progress
         println!("Testing wrap-around scenario...");
         println!(
-            "Before next(): cursor={}, consumer1={}, consumer2={}",
-            sequencer.cursor.get(),
+            "Before next(): consumer1={}, consumer2={}",
             consumer1.get(),
             consumer2.get()
         );
@@ -503,11 +505,7 @@ mod tests {
             }
         }
 
-        println!(
-            "Buffer full. Current cursor: {}, consumer: {}",
-            sequencer.cursor.get(),
-            consumer.get()
-        );
+        println!("Buffer full. consumer: {}", consumer.get());
 
         // Try to claim one more - this should work now that consumer has progressed
         println!("Trying to claim one more sequence...");
@@ -528,11 +526,7 @@ mod tests {
         let consumer = Arc::new(AtomicSequence::new(-1));
         sequencer.add_gating_sequence(&consumer);
 
-        println!(
-            "Initial state - cursor: {}, consumer: {}",
-            sequencer.cursor.get(),
-            consumer.get()
-        );
+        println!("Initial state - consumer: {}", consumer.get());
 
         // Claim 3 sequences (simulating 3 producers)
         let (seq1_start, seq1_end) = sequencer.next(1);
@@ -540,33 +534,36 @@ mod tests {
         let (seq3_start, seq3_end) = sequencer.next(1);
 
         println!("Claimed sequences: {seq1_start} {seq2_start} {seq3_start}");
-        println!("Cursor after claiming: {}", sequencer.cursor.get());
+        // no cursor advancement under MPMC publish semantics
 
         // Publish out of order: 3rd, 2nd, then 1st (simulating race condition)
         println!("Publishing sequence {seq3_start} (3rd)");
         sequencer.publish(seq3_start, seq3_end);
-        println!("Cursor after publishing 3rd: {}", sequencer.cursor.get());
+        // publish 3rd out of order
 
         println!("Publishing sequence {seq2_start} (2nd)");
         sequencer.publish(seq2_start, seq2_end);
-        println!("Cursor after publishing 2nd: {}", sequencer.cursor.get());
+        // publish 2nd out of order
 
         // At this point cursor should still be at -1 because sequence 0 hasn't been published
         // But if a consumer tries to wait for sequence 1 or 2, it will hang!
 
         println!("Publishing sequence {seq1_start} (1st)");
         sequencer.publish(seq1_start, seq1_end);
-        println!("Cursor after publishing 1st: {}", sequencer.cursor.get());
+        // publish 1st, contiguity established
 
         // Now cursor should jump to sequence 2 (all sequences 0,1,2 are published)
-        assert_eq!(sequencer.cursor.get(), 2);
+        assert_eq!(
+            sequencer.available_buffer.highest_published_sequence(0, 2),
+            2
+        );
 
         println!("Test completed successfully!");
     }
 
     #[test]
     fn test_benchmark_simulation_with_barriers() {
-        use crate::barrier::ProcessingSequenceBarrier;
+        use crate::barrier::MpmcSequenceBarrier;
         use crate::sequencer::MultiProducerSequencer;
         use crate::traits::{SequenceBarrier, WaitingStrategy};
         use std::sync::Arc;
@@ -589,19 +586,19 @@ mod tests {
         let sequencer = Arc::new(sequencer);
 
         // Create barriers (like the real benchmark does)
-        let barrier1 = ProcessingSequenceBarrier::new(
+        let barrier1 = MpmcSequenceBarrier::new(
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            vec![sequencer.get_cursor()],
+            sequencer.available_buffer.clone(),
             Arc::new(BusySpinWaitStrategy::new()),
         );
-        let barrier2 = ProcessingSequenceBarrier::new(
+        let barrier2 = MpmcSequenceBarrier::new(
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            vec![sequencer.get_cursor()],
+            sequencer.available_buffer.clone(),
             Arc::new(BusySpinWaitStrategy::new()),
         );
-        let barrier3 = ProcessingSequenceBarrier::new(
+        let barrier3 = MpmcSequenceBarrier::new(
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            vec![sequencer.get_cursor()],
+            sequencer.available_buffer.clone(),
             Arc::new(BusySpinWaitStrategy::new()),
         );
 
@@ -692,7 +689,10 @@ mod tests {
         consumer_thread3.join().unwrap();
 
         println!("Final state:");
-        println!("Cursor: {}", sequencer.cursor.get());
+        let hp = sequencer
+            .available_buffer
+            .highest_published_sequence(0, 10_000);
+        println!("Highest contiguous: {}", hp);
         println!("Consumer1: {}", consumer1.get());
         println!("Consumer2: {}", consumer2.get());
         println!("Consumer3: {}", consumer3.get());
@@ -774,12 +774,15 @@ mod tests {
         consumer_thread2.join().unwrap();
 
         println!("Final state:");
-        println!("Cursor: {}", sequencer.cursor.get());
+        let hp = sequencer
+            .available_buffer
+            .highest_published_sequence(0, 1000);
+        println!("Highest contiguous: {}", hp);
         println!("Consumer1: {}", consumer1.get());
         println!("Consumer2: {}", consumer2.get());
 
-        // Both producers published 20 sequences each, so cursor should be around 39
-        assert!(sequencer.cursor.get() >= 35); // Allow some leeway for race conditions
+        // Both producers published 20 sequences each, so highest contiguous should be around 39
+        assert!(hp >= 35); // Allow some leeway for race conditions
         assert!(consumer1.get() >= 15); // Consumers should have made good progress
         assert!(consumer2.get() >= 15);
 
@@ -848,7 +851,7 @@ mod tests {
         assert_eq!(end, 0);
 
         sequencer.publish(start, end);
-        assert_eq!(sequencer.cursor.get(), 0);
+        assert!(sequencer.available_buffer.is_available(0));
     }
 
     #[test]
@@ -863,7 +866,9 @@ mod tests {
         assert_eq!(end, 4);
 
         sequencer.publish(start, end);
-        assert_eq!(sequencer.cursor.get(), 4);
+        for i in start..=end {
+            assert!(sequencer.available_buffer.is_available(i));
+        }
     }
 
     #[test]
@@ -879,13 +884,22 @@ mod tests {
 
         // Publish out of order: 3rd, 1st, 2nd
         sequencer.publish(seq3_start, seq3_end); // Publish sequence 2
-        assert_eq!(sequencer.cursor.get(), -1); // Should not advance yet
+        assert_eq!(
+            sequencer.available_buffer.highest_published_sequence(0, 2),
+            -1
+        );
 
         sequencer.publish(seq1_start, seq1_end); // Publish sequence 0
-        assert_eq!(sequencer.cursor.get(), 0); // Should advance to 0
+        assert_eq!(
+            sequencer.available_buffer.highest_published_sequence(0, 2),
+            0
+        );
 
         sequencer.publish(seq2_start, seq2_end); // Publish sequence 1
-        assert_eq!(sequencer.cursor.get(), 2); // Should advance to 2 (all contiguous)
+        assert_eq!(
+            sequencer.available_buffer.highest_published_sequence(0, 2),
+            2
+        );
     }
 
     #[test]
@@ -900,7 +914,12 @@ mod tests {
 
         // The cursor should advance, but the scan should be limited
         // This test primarily ensures the scan limiting doesn't break functionality
-        assert_eq!(sequencer.cursor.get(), end);
+        assert_eq!(
+            sequencer
+                .available_buffer
+                .highest_published_sequence(0, end),
+            end
+        );
     }
 
     #[test]
@@ -937,7 +956,12 @@ mod tests {
 
         // All sequences should be published
         let expected_final_cursor = (num_threads * sequences_per_thread - 1) as i64;
-        assert_eq!(sequencer.cursor.get(), expected_final_cursor);
+        assert_eq!(
+            sequencer
+                .available_buffer
+                .highest_published_sequence(0, expected_final_cursor),
+            expected_final_cursor
+        );
     }
 
     #[test]
@@ -956,12 +980,18 @@ mod tests {
         sequencer.publish(start3, end3); // Publish 5
 
         // Cursor should not advance yet
-        assert_eq!(sequencer.cursor.get(), -1);
+        assert_eq!(
+            sequencer.available_buffer.highest_published_sequence(0, 5),
+            -1
+        );
 
         sequencer.publish(start1, end1); // Publish 0-2
 
         // Now cursor should advance to 5 (all sequences published)
-        assert_eq!(sequencer.cursor.get(), 5);
+        assert_eq!(
+            sequencer.available_buffer.highest_published_sequence(0, 5),
+            5
+        );
     }
 
     #[test]
@@ -1006,11 +1036,17 @@ mod tests {
             durations.push(handle.join().unwrap());
         }
 
-        // The test passes if all threads complete successfully
-        // The backoff mechanism should prevent excessive spinning
+        // The test passes if all threads complete successfully.
+        // Because the ring overwrites older generations, only the last `buffer_size`
+        // sequences are expected to be contiguous.
+        let expected_final = (num_contentious_threads * 10 - 1) as i64; // e.g., 19
+        let buffer_size = 16i64; // created above
+        let window_start = expected_final - (buffer_size - 1);
         assert_eq!(
-            sequencer.cursor.get(),
-            (num_contentious_threads * 10 - 1) as i64
+            sequencer
+                .available_buffer
+                .highest_published_sequence(window_start, expected_final),
+            expected_final
         );
 
         // Ensure threads didn't take excessively long (backoff should be bounded)
@@ -1040,7 +1076,9 @@ mod tests {
 
         // This is primarily a sanity check that the optimized publish doesn't
         // leave the available buffer in an inconsistent state
-        assert_eq!(sequencer.cursor.get(), end2);
+        for i in start1..=end2 {
+            assert!(sequencer.available_buffer.is_available(i));
+        }
     }
 
     #[test]
@@ -1053,14 +1091,27 @@ mod tests {
         // First, fill up most of the buffer
         let (start1, end1) = sequencer.next(6);
         sequencer.publish(start1, end1);
-        assert_eq!(sequencer.cursor.get(), 5);
+        assert_eq!(
+            sequencer
+                .available_buffer
+                .highest_published_sequence(0, end1),
+            end1
+        );
 
         // Now publish a batch that will wrap around
         let (start2, end2) = sequencer.next(4); // Should wrap around
         sequencer.publish(start2, end2);
 
-        // Verify the cursor advanced correctly
-        assert_eq!(sequencer.cursor.get(), end2);
+        // Verify availability for the wrapped range and contiguous from start2
+        for i in start2..=end2 {
+            assert!(sequencer.available_buffer.is_available(i));
+        }
+        assert_eq!(
+            sequencer
+                .available_buffer
+                .highest_published_sequence(start2, end2),
+            end2
+        );
     }
 
     #[test]
@@ -1096,7 +1147,12 @@ mod tests {
         let total_operations = num_threads * operations_per_thread;
 
         // Verify correctness
-        assert_eq!(sequencer.cursor.get(), (total_operations - 1) as i64);
+        assert_eq!(
+            sequencer
+                .available_buffer
+                .highest_published_sequence(0, (total_operations - 1) as i64),
+            (total_operations - 1) as i64
+        );
 
         // Performance check - should complete reasonably quickly
         // This is more of a sanity check than a precise benchmark

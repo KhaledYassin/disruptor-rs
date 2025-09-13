@@ -75,15 +75,18 @@ impl AtomicSequence {
     }
 
     // Get the current value of the sequence.
+    #[inline(always)]
     pub fn get(&self) -> Sequence {
         self.value.load(Ordering::Acquire)
     }
 
     // Set a new value for the sequence.
+    #[inline(always)]
     pub fn set(&self, new_value: Sequence) {
         self.value.store(new_value, Ordering::Release);
     }
 
+    #[inline(always)]
     pub fn compare_and_set(&self, expected: Sequence, new_value: Sequence) -> bool {
         self.value
             .compare_exchange(expected, new_value, Ordering::AcqRel, Ordering::Acquire)
@@ -91,17 +94,19 @@ impl AtomicSequence {
     }
 
     // Increment the sequence by 1 and return the new value.
+    #[inline(always)]
     pub fn get_and_increment(&self) -> Sequence {
         self.value.fetch_add(1, Ordering::AcqRel)
     }
 
     // Increment the sequence by 1 and return the old value.
+    #[inline(always)]
     pub fn increment_and_get(&self) -> Sequence {
         self.value.fetch_add(1, Ordering::AcqRel) + 1
     }
 
     /// Atomically add `delta` to the sequence and return the previous value.
-    #[inline]
+    #[inline(always)]
     pub fn get_and_add(&self, delta: Sequence) -> Sequence {
         self.value.fetch_add(delta, Ordering::AcqRel)
     }

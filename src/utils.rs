@@ -8,7 +8,7 @@ use crate::sequence::AtomicSequence;
 pub struct Utils;
 
 impl Utils {
-    #[inline]
+    #[inline(always)]
     pub fn get_minimum_sequence(sequences: &[Arc<AtomicSequence>]) -> i64 {
         if sequences.is_empty() {
             return i64::MAX;
@@ -25,7 +25,7 @@ impl Utils {
         min_val
     }
 
-    #[inline]
+    #[inline(always)]
     pub fn get_maximum_sequence(sequences: &[Arc<AtomicSequence>]) -> i64 {
         if sequences.is_empty() {
             return i64::MIN;
@@ -54,6 +54,10 @@ pub struct AvailableSequenceBuffer {
 }
 
 impl AvailableSequenceBuffer {
+    /// Construct a new available buffer for a power-of-two sized ring.
+    ///
+    /// The buffer stores a generation stamp per slot. A slot with sequence `s`
+    /// is considered available if `available_buffer[index].generation == s >> index_shift`.
     pub fn new(buffer_size: i64) -> Self {
         assert!(
             buffer_size > 0 && (buffer_size as u64).is_power_of_two(),
@@ -72,7 +76,8 @@ impl AvailableSequenceBuffer {
         }
     }
 
-    #[inline]
+    /// Mark a single sequence as available using a Release store.
+    #[inline(always)]
     pub fn set(&self, sequence: i64) {
         let index = (sequence & self.index_mask) as usize;
         let generation = sequence >> self.index_shift;
@@ -84,7 +89,10 @@ impl AvailableSequenceBuffer {
         }
     }
 
-    #[inline]
+    /// Returns true if `sequence` has been published.
+    ///
+    /// Uses an Acquire load to observe the Release from the producer.
+    #[inline(always)]
     pub fn is_available(&self, sequence: i64) -> bool {
         let index = (sequence & self.index_mask) as usize;
         let expected_generation = sequence >> self.index_shift;
@@ -99,6 +107,9 @@ impl AvailableSequenceBuffer {
 
     // No longer needed in generation-based design: unset is removed
 
+    /// Mark a batch `[start, end]` as available. Optimized for small ranges
+    /// and contiguous non-wrapping spans.
+    #[inline(always)]
     pub fn set_batch(&self, start: i64, end: i64) {
         if start > end {
             return; // Handle invalid range
@@ -148,8 +159,9 @@ impl AvailableSequenceBuffer {
 
     // No longer needed in generation-based design: unset_batch is removed
 
-    /// Returns the highest contiguous published sequence in [from, to].
+    /// Returns the highest contiguous published sequence in `[from, to]`.
     /// If `from` is not yet available, returns `from - 1`.
+    #[inline(always)]
     pub fn highest_published_sequence(&self, from: i64, to: i64) -> i64 {
         if from > to {
             return from - 1;
