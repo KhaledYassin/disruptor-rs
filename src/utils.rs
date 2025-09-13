@@ -88,8 +88,45 @@ impl AvailableSequenceBuffer {
             return; // Handle invalid range
         }
 
-        for seq in start..=end {
-            self.set(seq);
+        // Optimize for small batches (common case) by inlining the set logic
+        let batch_size = end - start + 1;
+        
+        if batch_size <= 8 {
+            // Small batch: inline the set operations to reduce function call overhead
+            for seq in start..=end {
+                let index = (seq & self.index_mask) as usize;
+                let generation = seq >> self.index_shift;
+                unsafe {
+                    self.available_buffer
+                        .get_unchecked(index)
+                        .value
+                        .store(generation, Ordering::Release);
+                }
+            }
+        } else {
+            // Large batch: check for wraparound and optimize accordingly
+            let start_index = (start & self.index_mask) as usize;
+            let end_index = (end & self.index_mask) as usize;
+            
+            if start_index <= end_index {
+                // No wraparound case - can process sequentially with better cache locality
+                let start_gen = start >> self.index_shift;
+                for (i, seq) in (start..=end).enumerate() {
+                    let index = start_index + i;
+                    let generation = start_gen + ((seq - start) >> self.index_shift);
+                    unsafe {
+                        self.available_buffer
+                            .get_unchecked(index)
+                            .value
+                            .store(generation, Ordering::Release);
+                    }
+                }
+            } else {
+                // Wraparound case - fall back to individual calls for correctness
+                for seq in start..=end {
+                    self.set(seq);
+                }
+            }
         }
     }
 

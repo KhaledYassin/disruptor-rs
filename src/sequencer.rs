@@ -266,19 +266,29 @@ impl<W: WaitingStrategy> Sequencer for MultiProducerSequencer<W> {
         // Mark published range as available (Release visibility)
         self.available_buffer.set_batch(low, high);
 
-        // Fast-path: attempt to advance only if the next slot is available.
-        // This allows any publisher that fills the gap at cursor+1 to make progress,
-        // even if it didn't publish that specific sequence.
+        // Fast-path check: only attempt cursor advancement if the next slot is available
+        // This provides the key optimization while maintaining correctness
         let mut cursor_val = self.cursor.get();
         if !self.available_buffer.is_available(cursor_val + 1) {
-            return;
+            return; // Gap at cursor+1, no advancement possible
         }
 
-        // Attempt to advance cursor to the highest contiguous published sequence
-        const SCAN_LIMIT: i64 = 4096;
-        loop {
+        // Adaptive scan limit based on batch size for better cache behavior
+        let batch_size = high - low + 1;
+        let scan_limit = if batch_size <= 10 { 
+            256   // Small batches: limited scan to reduce cache misses
+        } else if batch_size <= 100 { 
+            1024  // Medium batches: moderate scan
+        } else { 
+            4096  // Large batches: aggressive scan
+        };
+
+        // Attempt to advance cursor with bounded retries and exponential backoff
+        const MAX_CAS_ATTEMPTS: u32 = 4;
+        
+        for attempt in 0..MAX_CAS_ATTEMPTS {
             let start = cursor_val + 1;
-            let scan_to = std::cmp::max(high, start + SCAN_LIMIT);
+            let scan_to = std::cmp::min(high + scan_limit, start + scan_limit);
             let contiguous_end = self
                 .available_buffer
                 .highest_published_sequence(start, scan_to);
@@ -290,12 +300,18 @@ impl<W: WaitingStrategy> Sequencer for MultiProducerSequencer<W> {
             if self.cursor.compare_and_set(cursor_val, contiguous_end) {
                 self.waiting_strategy.signal_all_when_blocking();
                 return;
-            } else {
-                let new_cursor = self.cursor.get();
-                if !self.available_buffer.is_available(new_cursor + 1) {
-                    return; // No immediate progress possible
-                }
-                cursor_val = new_cursor;
+            }
+
+            // CAS failed - check if we can still make progress
+            let new_cursor = self.cursor.get();
+            if !self.available_buffer.is_available(new_cursor + 1) {
+                return; // No immediate progress possible
+            }
+            cursor_val = new_cursor;
+
+            // Exponential backoff to reduce contention
+            let backoff_cycles = 1_u32 << std::cmp::min(attempt, 6); // Cap at 64 spin loops
+            for _ in 0..backoff_cycles {
                 std::hint::spin_loop();
             }
         }

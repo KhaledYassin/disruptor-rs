@@ -1,206 +1,290 @@
-# Cursor Improvement Plan
+# Disruptor Performance Optimization Plan
 
-## Goal
+## Executive Summary
 
-Identify and implement high-impact improvements to the multi-producer Disruptor implementation so it can compete with crossbeam channels.
+The multi-producer disruptor implementation is unable to match crossbeam channel performance due to several critical bottlenecks. This plan identifies the root causes and provides a systematic approach to achieve competitive throughput.
+
+**Current Performance Gap**: Crossbeam channels significantly outperform the disruptor, particularly at higher batch sizes where channels achieve 15.4 Melem/s vs disruptor's 12.3 Melem/s (batch=100).
 
 ---
 
-## Major Bottlenecks (from code review)
+## Root Cause Analysis
 
-- **`AvailableSequenceBuffer` overhead**
-  - Uses a `HashMap` per publish (`set_batch` / `unset_batch`), causing large allocation and hashing overhead in the hot path.
-  - **Evidence:** `utils.rs` → `set_batch` and `unset_batch` build a `HashMap` for every call.
+After thorough code analysis, I've identified the following critical performance bottlenecks:
 
-```rust
-// src/utils.rs lines 95-105
-for seq in start..=end {
-    let index = (seq & self.index_mask) as usize;
-    let flag = 1i64 << (seq & 0x3f);
-    *updates.entry(index).or_insert(0) |= flag;
-}
-
-for (index, combined_flags) in updates {
-    self.available_buffer[index]
-        .value
-        .fetch_or(combined_flags, Ordering::Release);
-}
-```
-
-- **`publish()` inefficiency**
-  - Scans and attempts to advance the cursor even when the published range cannot advance the cursor.
-  - Unsets availability flags (extra work) after advancement.
+### 1. **Available Buffer Implementation Inefficiency**
+**Location**: `src/utils.rs:86-94` (`set_batch` method)
+**Issue**: The current generation-based design in `AvailableSequenceBuffer` is actually well-optimized, but the implementation has room for micro-optimizations.
 
 ```rust
-// src/sequencer.rs lines 260-288
-fn publish(&self, low: Sequence, high: Sequence) {
-    self.available_buffer.set_batch(low, high);
-    let mut cursor_val = self.cursor.get();
-    loop {
-        let mut next = cursor_val + 1;
-        // ... chunked scanning
-        let contiguous_end = next - 1;
-        if contiguous_end > cursor_val {
-            if self.cursor.compare_and_set(cursor_val, contiguous_end) {
-                self.available_buffer.unset_batch(cursor_val + 1, contiguous_end);
-                self.waiting_strategy.signal_all_when_blocking();
-                break;
-            } else {
-                // retry with backoff
-            }
-        } else {
-            break;
-        }
+// Current implementation
+pub fn set_batch(&self, start: i64, end: i64) {
+    if start > end {
+        return; // Handle invalid range
+    }
+    for seq in start..=end {
+        self.set(seq);  // Individual calls to set()
     }
 }
 ```
 
-- **Available-buffer design inefficiency**
+### 2. **Suboptimal Publish Path Scanning**
+**Location**: `src/sequencer.rs:265-302` (`publish` method)
+**Issue**: The publish method performs expensive scans even when cursor advancement is unlikely.
 
-  - Relies on setting/unsetting bit flags.
-  - Classic LMAX design uses per-slot "generation" (`sequence >> index_shift`), never clears flags.
+Key problems:
+- Always calls `highest_published_sequence` even for out-of-order publishes
+- SCAN_LIMIT of 4096 may be too aggressive for small batches
+- CAS loop with spin_loop but no exponential backoff
 
-- **Overly strong atomics (`SeqCst`)** in hot paths.
-  - `AtomicSequence::get_and_add`, `compare_and_set` use `SeqCst`.
-  - Hurts throughput on non-x86 or under contention.
+### 3. **Atomic Ordering Overhead**
+**Location**: `src/sequence.rs:89` (`compare_and_set`)
+**Issue**: Uses `AcqRel/Acquire` which is correct but may be more expensive than necessary in some cases.
 
-```rust
-// src/sequence.rs lines 87-95
-pub fn compare_and_set(&self, expected: Sequence, new_value: Sequence) -> bool {
-    self.value
-        .compare_exchange(expected, new_value, Ordering::SeqCst, Ordering::Acquire)
-        .is_ok()
-}
-
-pub fn get_and_add(&self, delta: Sequence) -> Sequence {
-    self.value.fetch_add(delta, Ordering::SeqCst)
-}
-```
-
-- **`MultiProducerSequencer::next` waits inefficiently**
-  - Tight spinning with `yield_now`, not using `WaitingStrategy`, no `cpu_relax`.
+### 4. **Producer Capacity Wait Inefficiency**  
+**Location**: `src/sequencer.rs:246-260` (`next` method)
+**Issue**: Capacity waiting uses manual spin with `yield_now` instead of integrating with the waiting strategy.
 
 ```rust
-// src/sequencer.rs lines 245-252
-if wrap_point > cached {
-    loop {
-        let min_seq = Utils::get_minimum_sequence(&self.gating_sequences);
-        self.cached_value.set(min_seq);
-        if wrap_point <= min_seq { break; }
+// Current approach in next()
+let mut spins: u32 = 0;
+loop {
+    let min_seq = Utils::get_minimum_sequence(&self.gating_sequences);
+    // ... capacity check ...
+    std::hint::spin_loop();
+    spins = spins.wrapping_add(1);
+    if spins & 0xFF == 0 {
         std::thread::yield_now();
     }
 }
 ```
 
+### 5. **Memory Access Patterns**
+**Issue**: Cache line thrashing from concurrent access to shared sequences and buffer slots.
+
 ---
 
-## High-Impact Improvement Plan
+## Optimization Strategy
 
-### Phase 1: Replace `AvailableSequenceBuffer` with generation-based design
+### Phase 1: Micro-optimize Available Buffer (Low Risk, Medium Impact)
 
-- **Rationale:** Removes per-publish allocations and extra atomics.
-- **Changes in `src/utils.rs`:**
-  - Fields: `buffer: Vec<CacheAlignedAtomicI64>`, `index_mask: i64`, `index_shift: u32`.
-  - Methods:
-    - `set(sequence)` → store generation (`seq >> shift`) in slot.
-    - `set_batch(start, end)` → loop over `set()`.
-    - `is_available(sequence)` → check slot gen matches expected.
-    - `highest_published_sequence(from, to)` → linear scan.
-  - **Remove** `unset()` and `unset_batch()`.
-  - Update tests accordingly.
-
-### Phase 2: Optimize `publish()` path
-
-- **Rationale:** Avoid unnecessary scans.
-- **Changes:**
-  - Fast path: if `low != cursor + 1`, return.
-  - Use `highest_published_sequence` to advance cursor.
-  - Remove `unset_batch` calls.
-  - Use bounded CAS retries with `spin_loop`.
-
-### Phase 3: Reduce atomic ordering costs
-
-- **compare_and_set:** `Ordering::AcqRel` (success) / `Ordering::Acquire` (failure).
-- **get_and_add:** `Ordering::AcqRel` (or Relaxed after audit).
-
-### Phase 4: Improve capacity wait in `next()`
-
-- Replace `yield_now` with `spin_loop`.
-- Optionally integrate `WaitingStrategy`.
-
-### Phase 5: Micro-optimizations
-
-- Add `std::hint::spin_loop()` inside `BusySpinWaitStrategy` loop.
-
+**Optimize batch operations**:
 ```rust
-// src/waiting.rs lines 116-121
-loop {
-    if check_alert() { return None; }
-    let minimum_sequence = Utils::get_minimum_sequence(dependencies);
-    if minimum_sequence >= sequence { return Some(minimum_sequence); }
-    std::hint::spin_loop();
+// Proposed optimization in set_batch
+pub fn set_batch(&self, start: i64, end: i64) {
+    if start > end { return; }
+    
+    // Batch calculate generations to reduce division overhead
+    let start_index = (start & self.index_mask) as usize;
+    let end_index = (end & self.index_mask) as usize;
+    let start_gen = start >> self.index_shift;
+    
+    if start_index <= end_index {
+        // No wraparound case - can potentially vectorize
+        for (i, seq) in (start..=end).enumerate() {
+            let index = start_index + i;
+            let generation = start_gen + ((seq - start) >> self.index_shift);
+            unsafe {
+                self.available_buffer.get_unchecked(index)
+                    .value.store(generation, Ordering::Release);
+            }
+        }
+    } else {
+        // Wraparound case - fall back to individual calls
+        for seq in start..=end {
+            self.set(seq);
+        }
+    }
 }
 ```
 
-### Phase 6: Tests and benchmarks
+### Phase 2: Optimize Publish Path (High Risk, High Impact)
 
-- Update unit tests.
-- Add new tests for generation semantics and fast-path advancement.
-- Run criterion benches on `mpmc` vs `mpmc_disruptor`.
+**Smart scanning with adaptive limits**:
+```rust
+fn publish(&self, low: Sequence, high: Sequence) {
+    // Mark published range as available
+    self.available_buffer.set_batch(low, high);
+    
+    // Fast path: only advance if we're filling the gap
+    let cursor_val = self.cursor.get();
+    if low != cursor_val + 1 {
+        return; // Out of order publish, let someone else advance
+    }
+    
+    // Adaptive scan limit based on batch size
+    let batch_size = high - low + 1;
+    let scan_limit = if batch_size <= 10 { 
+        256 
+    } else if batch_size <= 100 { 
+        1024 
+    } else { 
+        4096 
+    };
+    
+    // Try to advance cursor with bounded retries
+    const MAX_CAS_ATTEMPTS: u32 = 3;
+    for attempt in 0..MAX_CAS_ATTEMPTS {
+        let start = cursor_val + 1;
+        let scan_to = std::cmp::min(high + scan_limit, start + scan_limit);
+        let contiguous_end = self.available_buffer
+            .highest_published_sequence(start, scan_to);
+            
+        if contiguous_end > cursor_val {
+            if self.cursor.compare_and_set(cursor_val, contiguous_end) {
+                self.waiting_strategy.signal_all_when_blocking();
+                return;
+            }
+        }
+        
+        // Exponential backoff for contention
+        for _ in 0..(1 << attempt) {
+            std::hint::spin_loop();
+        }
+    }
+}
+```
+
+### Phase 3: Reduce Atomic Ordering Cost (Low Risk, Low Impact)
+
+Keep current `AcqRel/Acquire` ordering as it's correct and the performance gain would be minimal.
+
+### Phase 4: Improve Producer Waiting (Medium Risk, Medium Impact)
+
+**Integrate with waiting strategy**:
+```rust
+fn next(&self, n: Sequence) -> (Sequence, Sequence) {
+    let next = self.high_water_mark.get_and_add(n);
+    let end = next + n;
+    let wrap_point = end - self.buffer_size;
+    
+    let cached = self.cached_value.get();
+    if wrap_point > cached {
+        // Use waiting strategy for consistent backoff behavior
+        let min_sequences = vec![]; // Collect gating sequences
+        if let Some(new_min) = self.waiting_strategy.wait_for(
+            wrap_point, 
+            &self.gating_sequences, 
+            || false
+        ) {
+            self.cached_value.set(new_min);
+        }
+    }
+    
+    (next + 1, end)
+}
+```
+
+### Phase 5: Memory Layout Optimizations (High Risk, High Impact)
+
+**Separate hot/cold data**:
+- Keep frequently accessed fields (cursor, high_water_mark) in separate cache lines
+- Consider NUMA-aware allocation for large ring buffers
+- Add prefetch hints for sequential access patterns
 
 ---
 
-## Order of Operations
+## Implementation Plan
 
-1. Implement Phase 1 (`utils.rs`). Update `publish()` to stop calling `unset()`. Fix tests.
-2. Implement Phase 2 (`publish` fast path).
-3. Implement Phase 4 small change: `spin_loop` in `next()`.
-4. Implement Phase 3 atomic ordering changes.
-5. Add BusySpinWaitStrategy improvement.
-6. Run tests and benchmarks.
+### Sprint 1: Foundation (Week 1)
+1. ✅ **Benchmark baseline performance** - establish current metrics
+2. **Implement adaptive scanning** in publish path
+3. **Add exponential backoff** to CAS loops
+4. **Micro-optimize set_batch** for sequential case
 
----
+### Sprint 2: Core Optimizations (Week 2)  
+1. **Implement smart publish path** with gap detection
+2. **Integrate waiting strategy** into producer capacity waiting
+3. **Add prefetch hints** for ring buffer access
+4. **Comprehensive testing** of optimizations
 
-## Risks & Edge Cases
-
-- **Wrap-around correctness:** Ensure `next()` capacity check prevents slot reuse.
-- **Out-of-order publishes:** Ensure cursor advances only when `low == cursor+1`.
-- **Memory ordering:** Ensure Release/Acquire discipline holds.
-- **Benchmarking noise:** Run multiple times for stable results.
-
----
-
-## Stretch Goals
-
-- Replace gating-min loops with `WaitingStrategy`.
-- Add parker-based blocking strategy.
-- Provide specialized single-sequence publish fast path.
+### Sprint 3: Advanced Optimizations (Week 3)
+1. **Memory layout improvements** - separate hot/cold data
+2. **NUMA-aware optimizations** for large buffers
+3. **Vectorization opportunities** in batch operations
+4. **Final performance validation**
 
 ---
 
-## Expected Impact
+## Risk Assessment
 
-- **Biggest win:** Removing `HashMap` + no-unset semantics.
-- **Fast-path publish:** Avoid repeated scans on out-of-order publishes.
-- **Smaller gains:** Atomic ordering relaxation, `spin_loop` hints.
-- **Overall:** Closes much of the throughput gap vs crossbeam MPMC channels.
+### High Risk Changes
+- **Memory layout modifications**: Could introduce subtle bugs or cache line misalignment
+- **Publish path logic changes**: Critical for correctness, extensive testing required
+
+### Medium Risk Changes  
+- **Waiting strategy integration**: May affect blocking behavior
+- **Adaptive scanning limits**: Could impact fairness
+
+### Low Risk Changes
+- **Micro-optimizations in set_batch**: Isolated changes with clear benefits
+- **Exponential backoff**: Standard technique with predictable behavior
 
 ---
 
-## Results (Criterion)
+## Success Metrics
 
-- Environment: macOS 15.6.1, Apple M4 Pro
-- Commit: 79e0dcd
+### Primary Goals
+1. **Match crossbeam performance**: Achieve ≥15 Melem/s at batch=100
+2. **Maintain correctness**: Pass all existing tests
+3. **Preserve latency characteristics**: Keep low-latency benefits
 
-- mpmc_disruptor throughput (higher is better):
-  - batch=1: 4.09–4.21 Melem/s
-  - batch=10: 10.84–10.92 Melem/s
-  - batch=100: 12.31–12.35 Melem/s
+### Secondary Goals  
+1. **Improve small batch performance**: Target >5 Melem/s at batch=1
+2. **Reduce CPU usage**: Lower spin costs in contention scenarios
+3. **Better scaling**: Linear throughput scaling with producer count
 
-- mpmc baseline:
-  - batch=1: 3.33–3.37 Melem/s
-  - batch=10: 14.68–14.86 Melem/s
-  - batch=100: 15.40–15.62 Melem/s
+### Benchmark Targets
+| Batch Size | Current (Melem/s) | Target (Melem/s) | Stretch (Melem/s) |
+|------------|-------------------|------------------|-------------------|
+| 1          | 4.2               | 6.0              | 8.0               |
+| 10         | 10.9              | 15.0             | 18.0              |
+| 100        | 12.3              | 15.5             | 20.0              |
 
-Notes:
-- Some regressions were observed at smaller batch sizes compared to prior runs; results can vary with thermal and scheduler conditions. The publish scan behavior remains unchanged and tests cover out-of-order and wrap-around cases.
+---
+
+## Validation Strategy
+
+### Unit Testing
+- Extend existing test coverage for edge cases
+- Add specific tests for optimization paths
+- Stress test with high contention scenarios
+
+### Performance Testing
+- Before/after benchmarks for each optimization
+- Cross-platform validation (x86, ARM)
+- Memory usage profiling
+
+### Correctness Validation
+- Property-based testing for publish ordering
+- Long-running stability tests
+- Race condition detection with thread sanitizer
+
+---
+
+## Backup Plan
+
+If optimizations don't achieve target performance:
+
+1. **Alternative available buffer designs**:
+   - Bit-packed availability flags
+   - Lock-free MPMC queue for published sequences
+
+2. **Fundamental architecture changes**:
+   - Segment-based ring buffer to reduce contention
+   - Per-producer sequence tracking
+
+3. **Hybrid approaches**:
+   - Use crossbeam channels internally for coordination
+   - Maintain disruptor API for compatibility
+
+---
+
+## Next Steps
+
+1. **Immediate**: Begin Phase 1 implementation with adaptive scanning
+2. **Week 1**: Complete micro-optimizations and establish new baseline  
+3. **Week 2**: Implement core publish path improvements
+4. **Week 3**: Advanced optimizations and final validation
+
+The goal is to systematically eliminate performance bottlenecks while maintaining the disruptor's correctness guarantees and low-latency characteristics.
