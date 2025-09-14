@@ -63,6 +63,7 @@ use std::sync::{
 use crate::{
     sequence::{AtomicSequence, Sequence},
     traits::{SequenceBarrier, WaitingStrategy},
+    utils::AvailableSequenceBuffer,
 };
 
 /// A barrier that controls consumer access to the ring buffer based on available sequences
@@ -106,6 +107,85 @@ impl<W: WaitingStrategy> SequenceBarrier for ProcessingSequenceBarrier<W> {
     }
 
     /// Signals waiting threads that new sequences may be available.
+    fn signal(&self) {
+        self.waiting_strategy.signal_all_when_blocking()
+    }
+}
+
+/// A barrier for MPMC that waits directly on per-slot readiness in the
+/// [`AvailableSequenceBuffer`].
+///
+/// # Design
+///
+/// Instead of depending on a publisher-advanced contiguous `cursor`, the
+/// `MpmcSequenceBarrier` checks whether a specific slot (sequence) is ready by
+/// consulting the generation-stamped ring entries inside
+/// [`AvailableSequenceBuffer`]. This mirrors the design used by bounded
+/// multi-producer / multi-consumer channels where senders mark a slot as ready
+/// with a Release store and receivers observe readiness with an Acquire load.
+///
+/// - `wait_for(sequence)` spins with a small backoff until the slot for
+///   `sequence` is observed as available.
+/// - Once available, it attempts to extend the contiguous range starting at
+///   `sequence` via `highest_published_sequence` to enable batch processing.
+/// - `signal()` delegates to the configured `WaitingStrategy`.
+///
+/// # Memory Ordering
+///
+/// The producer path uses Release stores when marking a slot as available.
+/// This barrier observes slot readiness using Acquire loads, which guarantees
+/// that consumer threads see the event payload writes that happened-before the
+/// publish.
+pub struct MpmcSequenceBarrier<W: WaitingStrategy> {
+    alert: Arc<AtomicBool>,
+    available: Arc<AvailableSequenceBuffer>,
+    waiting_strategy: Arc<W>,
+}
+
+impl<W: WaitingStrategy> MpmcSequenceBarrier<W> {
+    pub fn new(
+        alert: Arc<AtomicBool>,
+        available: Arc<AvailableSequenceBuffer>,
+        waiting_strategy: Arc<W>,
+    ) -> Self {
+        Self {
+            alert,
+            available,
+            waiting_strategy,
+        }
+    }
+}
+
+impl<W: WaitingStrategy> SequenceBarrier for MpmcSequenceBarrier<W> {
+    fn wait_for(&self, sequence: Sequence) -> Option<Sequence> {
+        let mut spins = 0u32;
+        loop {
+            if self.alert.load(Ordering::Relaxed) {
+                return None;
+            }
+            if self.available.is_available(sequence) {
+                break;
+            }
+
+            spins = spins.saturating_add(1);
+            if spins < 64 {
+                std::hint::spin_loop();
+            } else if spins < 128 {
+                std::thread::yield_now();
+            } else {
+                std::thread::sleep(std::time::Duration::from_nanos(1));
+                spins = 0;
+            }
+        }
+
+        // Batch contiguous availability starting from `sequence`
+        let scan_limit = sequence + 1024;
+        let contiguous = self
+            .available
+            .highest_published_sequence(sequence, scan_limit);
+        Some(contiguous)
+    }
+
     fn signal(&self) {
         self.waiting_strategy.signal_all_when_blocking()
     }

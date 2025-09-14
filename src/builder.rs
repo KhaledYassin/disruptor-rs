@@ -284,6 +284,8 @@ impl<'a, S: Sequencer + 'a, D: DataProvider<T> + 'a, T: Send + 'a> BarrierScope<
         self.event_handlers.push(runnable);
     }
 
+    // Worker-pool APIs removed
+
     pub fn with_barrier(mut self, f: impl FnOnce(&mut BarrierScope<'a, S, D, T>)) {
         let mut scope = BarrierScope {
             sequencer: self.sequencer,

@@ -115,6 +115,62 @@ handle.join();
 
 The `MultiProducerSequencer` feature is not very stable yet. You may feel free to use it experimentally. It passes all the sequencing tests but it's not optimized enough to beat the impressive performance of the [crossbeam_channel](https://github.com/crossbeam-rs/crossbeam/tree/master/crossbeam-channel). Any contributions in this regard are more than welcome.
 
+## Benchmarks
+
+The repository includes Criterion benchmarks in `benches/throughput.rs` comparing:
+
+- Crossbeam channels (SPSC and MPMC)
+- Disruptor (SPSC and MPMC) with `BusySpinWaitStrategy`
+
+### Methodology (from `benches/throughput.rs`)
+
+- Buffer size: 1024 elements (`BUFFER_SIZE`)
+- Elements per run: `ELEMENTS = BUFFER_SIZE`
+- Producer/consumer counts for MPMC: 3 producers, 3 consumers
+- Batch sizes tested: 1, 10, 100 elements
+- Criterion configuration:
+  - Warm-up: 5–10 seconds (depending on group)
+  - Measurement time: 5–10 seconds (default group settings)
+  - Sampling mode: Flat
+
+Notes:
+
+- Variance and outliers are reported by Criterion; see `target/criterion/*/report/index.html` for full visualizations.
+- Numbers depend on hardware and OS. Use them for relative comparisons.
+
+### How to run
+
+```bash
+# Run all tests first
+cargo test
+
+# Run throughput benchmarks
+cargo bench --bench throughput
+```
+
+### Interpretation
+
+- SPSC Disruptor shows strong efficiency at higher batch sizes due to contiguous scans and preallocated ring memory.
+- MPMC Disruptor improves the send path by marking per-slot availability (no publish-side cursor advance). Receivers determine contiguity, similar to Crossbeam’s approach.
+
+### Tabular comparison of the benchmark results
+
+SPSC (std mpsc) vs Disruptor (median values):
+
+| Batch | std mpsc Time | Disruptor Time | std mpsc Thrpt | Disruptor Thrpt |
+| ----- | ------------- | -------------- | -------------- | --------------- |
+| 1     | 176.61 µs     | 56.252 µs      | 5.7980 Melem/s | 18.204 Melem/s  |
+| 10    | 32.749 µs     | 31.897 µs      | 31.268 Melem/s | 32.103 Melem/s  |
+| 100   | 27.737 µs     | 20.300 µs      | 36.918 Melem/s | 50.444 Melem/s  |
+
+MPMC (crossbeam) vs Disruptor (median values):
+
+| Batch | Crossbeam Time | Disruptor Time | Crossbeam Thrpt | Disruptor Thrpt |
+| ----- | -------------- | -------------- | --------------- | --------------- |
+| 1     | 312.90 µs      | 173.65 µs      | 3.2726 Melem/s  | 5.8970 Melem/s  |
+| 10    | 68.888 µs      | 106.74 µs      | 14.865 Melem/s  | 9.5937 Melem/s  |
+| 100   | 64.921 µs      | 101.91 µs      | 15.773 Melem/s  | 10.048 Melem/s  |
+
 ## Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request. Areas of interest:

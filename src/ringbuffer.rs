@@ -55,6 +55,7 @@ impl<T: Send + Sync> DataProvider<T> for RingBuffer<T> {
     /// - `sequence`: The sequence of the element to get.
     /// # Returns
     /// A reference to the element at the given sequence.
+    #[inline(always)]
     unsafe fn get(&self, sequence: Sequence) -> &T {
         let index = sequence as usize & self._mask;
         &*self._data[index].get()
@@ -68,6 +69,7 @@ impl<T: Send + Sync> DataProvider<T> for RingBuffer<T> {
     /// - `sequence`: The sequence of the element to get.
     /// # Returns
     /// A mutable reference to the element at the given sequence.
+    #[inline(always)]
     unsafe fn get_mut(&self, sequence: Sequence) -> &mut T {
         let index = sequence as usize & self._mask;
         &mut *self._data[index].get()

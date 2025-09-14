@@ -124,6 +124,7 @@ impl WaitingStrategy for BusySpinWaitStrategy {
             if minimum_sequence >= sequence {
                 return Some(minimum_sequence);
             }
+            std::hint::spin_loop();
         }
     }
 
