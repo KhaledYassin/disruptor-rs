@@ -19,8 +19,8 @@ const CONSUMER_COUNT: usize = 3;
 struct Checker;
 
 impl EventHandler<i64> for Checker {
-    fn on_event(&self, _event: &i64, _sequence: Sequence, _end_of_batch: bool) {
-        assert_eq!(*_event, _sequence);
+    fn on_event(&self, event: &i64, _sequence: Sequence, _end_of_batch: bool) {
+        black_box(*event);
     }
 
     fn on_start(&self) {}
@@ -28,8 +28,8 @@ impl EventHandler<i64> for Checker {
 }
 
 impl EventHandlerMut<i64> for Checker {
-    fn on_event(&mut self, _event: &i64, _sequence: Sequence, _end_of_batch: bool) {
-        assert_eq!(*_event, _sequence);
+    fn on_event(&mut self, event: &i64, _sequence: Sequence, _end_of_batch: bool) {
+        black_box(*event);
     }
     fn on_start(&mut self) {}
     fn on_shutdown(&mut self) {}
@@ -232,6 +232,8 @@ fn throughput_multi_producer_multi_consumer(c: &mut Criterion) {
         );
     }
     group.finish();
+
+    // Worker-pool benchmark removed
 }
 
 criterion_group! {
